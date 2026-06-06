@@ -1,0 +1,307 @@
+import io
+import sys
+import asyncio
+import time
+import random
+import logging
+from datetime import date
+
+import numpy as np
+import pandas as pd
+import yfinance as yf
+from botocore.exceptions import ClientError
+from yfinance.exceptions import YFRateLimitError, YFTickerMissingError, YFInvalidPeriodError
+
+from ...config.minio_conn import s3_client, MINIO_BUCKET
+
+from ...notify.slack_notify import slack_text_notify
+from ...utils.helpers import countdown
+
+logger = logging.getLogger(__name__)
+
+# 1. 取得 ticker 清單
+def get_co_list(
+    bucket: str,
+    object_name: str
+) -> list[str]:
+
+    try:
+        response = s3_client.get_object(
+            Bucket=bucket, 
+            Key=object_name
+        )
+        buf = io.BytesIO(response["Body"].read())
+
+        df = pd.read_parquet(buf, engine="pyarrow", columns=["ticker", "is_active"])
+        df = df[df["is_active"] == True]
+
+        tickers = df["ticker"].tolist()
+        logger.info(f"從 {bucket}/{object_name} 取得 {len(tickers)} 檔")
+        return tickers
+
+    except ClientError as e:
+        logger.error(f"MinIO 讀取失敗 ({bucket}/{object_name}): {e}", exc_info=True)
+        raise
+
+# 2. 儲存單一 ticker 基本面 Parquet → MinIO（同步）
+def _save_parquet(
+    df: pd.DataFrame,
+    bucket: str,
+    object_name: str,
+    ) -> bool:
+
+    try:
+        buf = io.BytesIO()
+        df.to_parquet(buf, index=False, engine="pyarrow")
+        buf.seek(0)
+
+        try:
+            s3_client.head_bucket(Bucket=bucket)
+        except ClientError:
+            s3_client.create_bucket(Bucket=bucket)
+
+        s3_client.put_object(
+            Bucket = bucket,
+            Key = object_name,
+            Body = buf,
+        )
+        logger.info(f"已存入 {bucket}/{object_name}，共 {len(df)} 筆")
+        return True
+
+    except Exception as e:
+        logger.error(f"MinIO 上傳失敗 - {e}", exc_info=True)
+        return False
+
+# 3. 抓單一 ticker 基本面（同步）
+def fetch_fund(ticker: str) -> dict:
+    """
+    抓取單一 ticker 基本面資料，回傳統一格式的 result dict。
+    status: "success" | "failed" | "retry"
+    """
+    start = time.perf_counter()
+    try:
+        stock = yf.Ticker(ticker)
+        market = stock.get_info()
+
+        # ── 價格計算 ──────────────────────────
+        current_price = market.get("currentPrice")
+        if current_price is None:
+            hist = stock.history(period="max")
+            if hist.empty:
+                raise ValueError("history 為空，無法取得 current_price")
+            current_price = hist["Close"].iloc[-1]
+
+        hist_high = stock.history(period="max")["Close"].max()
+        hist_high_52w = market.get("fiftyTwoWeekHigh")
+
+        price_ratio    = np.trunc((current_price / hist_high) * 100) / 100 if hist_high else None
+        price_ratio_52w = np.trunc((current_price / hist_high_52w) * 100) / 100 if hist_high_52w else None
+
+        # ── 整理欄位 ──────────────────────────
+        row_data = {
+            "紀錄日期":                         date.today(),
+            "股票代碼":                          ticker,
+            "市值":                              market.get("marketCap", None),
+            "本益比(trailingP/E)":               market.get("trailingPE", None),
+            "預期本益比(forwardP/E)":             market.get("forwardPE", None),
+            "市銷率P/S":                         market.get("priceToSalesTrailing12Months", None),
+            "流動比率":                          market.get("currentRatio", None),
+            "產權比率/負債權益比":                market.get("debtToEquity", None),
+            "ROE":                               market.get("returnOnEquity", None),
+            "ROA(TTM)":                          market.get("returnOnAssets", None),
+            "EPS(TTM)":                          market.get("epsTrailingTwelveMonths", None),
+            "EPS增長率":                         market.get("earningsGrowth", None),
+            "EPS預期":                           market.get("forwardEps", None),
+            "淨利潤":                            market.get("netIncomeToCommon", None),
+            "經營現金流":                        market.get("operatingCashflow", None),
+            "年度收入增長":                      market.get("revenueGrowth", None),
+            "年銷售收入":                        market.get("totalRevenue", None),
+            "目前價格":                          current_price,
+            "52週價格最低/priceLow52W":          market.get("fiftyTwoWeekLow", None),
+            "52週價格最高/priceHigh52W":         hist_high_52w,
+            "52週價格變化/priceChange52W":       market.get("52WeekChange", None),
+            "歷史新高率":                        price_ratio,
+            "52週新高率":                        price_ratio_52w,
+            "上一季日均成交/avgDailyVolumeLastQuarter": market.get("averageDailyVolume3Month", None),
+            "機構持股比例":                      market.get("heldPercentInstitutions", None),
+            "分析師平均評級/analystRatingMean":  market.get("recommendationMean", None),
+            "分析師建議/analystRatingKey":       market.get("recommendationKey", None),
+        }
+
+        elapse = time.perf_counter() - start
+        logger.info(f"{ticker}: 抓取成功，花費 {elapse:.1f} 秒")
+        return {
+            "ticker": ticker,
+            "row_data": row_data,
+            "status": "success",
+            "error":  None,
+            "elapse": elapse,
+        }
+
+    except (YFTickerMissingError, YFInvalidPeriodError) as e:
+        elapse = time.perf_counter() - start
+        logger.warning(f"{ticker}: {e}")
+        return {
+            "ticker": ticker,
+            "row_data": row_data,
+            "status": "failed",
+            "error":  None,
+            "elapse": elapse,
+        }
+    
+    except YFRateLimitError as e:
+        elapse = time.perf_counter() - start
+        logger.warning(f"{ticker}: {e}")
+        return {
+            "ticker": ticker,
+            "row_data": row_data,
+            "status": "retry",
+            "error":  None,
+            "elapse": elapse,
+        }
+    except Exception as e:
+        elapse = time.perf_counter() - start
+        logger.error(f"{ticker}: {e}")
+        return {
+            "ticker": ticker,
+            "row_data": row_data,
+            "status": "failed",
+            "error":  None,
+            "elapse": elapse,
+        }
+
+# 4. 非同步包裝（對應 fetch_price → fetch_one）
+async def fetch_one(ticker: str) -> dict:
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: fetch_fund(ticker)
+    )
+    return result
+
+# 5. 統籌並發（對應 fetch_all）
+async def fetch_all(tickers: list[str]):
+    sem = asyncio.Semaphore(3)
+    
+    async def fetch_with_sem(ticker: str) -> dict:
+        await asyncio.sleep(random.uniform(0.5, 1.5))
+        async with sem:
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+            result = await fetch_one(ticker)
+
+        if result["status"] == "success":
+            logger.info(f"{result['ticker']}: 抓取成功")
+
+        return result
+
+    async def fetch_with_retry(ticker: str, max_retry: int = 3) -> dict:
+        result = None
+
+        for attempt in range(1, max_retry + 1):
+            if attempt > 1:
+                wait = (attempt - 1) * 10
+                logger.info(f"{ticker}: retry {attempt}/{max_retry}，等待 {wait} 秒")
+                await asyncio.sleep(wait)
+
+            result = await fetch_with_sem(ticker)
+
+            if result["status"] != "retry":
+                return result
+
+        logger.warning(f"{ticker}: 超過最大重試次數 {max_retry}")
+        return result
+
+    # ── 並發執行所有 ticker ───────────────────
+    total_start = time.perf_counter()
+    results = await asyncio.gather(
+        *[fetch_with_retry(t) for t in tickers],
+        return_exceptions=True,
+    )
+    total_elapse = time.perf_counter() - total_start
+    logger.info(f"本輪總花費時間: {total_elapse:.1f}s")
+
+    # ── 分類結果 ─────────────────────────────
+    success, retry, failed = [], [], []
+    for r in results:
+        if isinstance(r, Exception) or not isinstance(r, dict):
+            failed.append(r)
+        elif r["status"] == "success":
+            success.append(r)
+        elif r["status"] == "retry":
+            retry.append(r)
+        else:
+            failed.append(r)
+
+    return success, retry, failed
+
+# 6. 摘要文字
+def text_summary(success, retry, failed) -> str:
+    lines = ["📊 ==基本面抓取結果摘要=="]
+
+    lines.append(f"\n✅ 成功 ({len(success)})")
+    for r in success:
+        lines.append(f"  • {r['ticker']}（{r['elapse']:.2f}s）")
+
+    lines.append(f"\n🔁 待重試 ({len(retry)})")
+    for r in retry:
+        lines.append(f"  • {r['ticker']}")
+
+    lines.append(f"\n❌ 失敗 ({len(failed)})")
+    for r in failed:
+        if isinstance(r, dict):
+            lines.append(f"  • {r['ticker']}：{r.get('error', 'unknown')}")
+        else:
+            lines.append(f"  • {r}")
+
+    return "\n".join(lines)
+
+# 7. Entry point
+def main():
+
+    goal_object_name = f"stock/fundamentals/{date.today()}_us_fundamentals.parquet"
+
+    tickers = get_co_list(
+        MINIO_BUCKET,
+        f"stock/company_list/us_tickers_list.parquet"
+    )
+    success, retry, failed = asyncio.run(fetch_all(tickers))
+
+    # 所有成功的 row dict → 一張 rows_data df → 一個 Parquet
+    if success:
+        rows_data = [r["row_data"] for r in success]
+        df_all = pd.DataFrame(rows_data)
+
+        exclude_cols = {"紀錄日期","股票代碼","分析師建議/analystRatingKey"}
+        # 處理 object 欄位中的 'Infinity' 字串
+        obj_cols = [c for c in df_all.select_dtypes(include="object").columns if c not in exclude_cols]
+        df_all[obj_cols] = df_all[obj_cols].apply(pd.to_numeric, errors="coerce")
+
+        # 處理真正的 float inf
+        df_all.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        num_cols = [c for c in df_all.select_dtypes(include="number").columns if c not in exclude_cols]
+        # apply() 可以「批量操作整欄or整列」
+        df_all[num_cols] = (
+            df_all[num_cols]
+            .apply(pd.to_numeric, errors="coerce")     # pd.to_numeric() 只能處理一維(Series),每欄轉成數值,不能轉的變 NaN
+            .apply(lambda x: np.trunc(x * 1000) / 1000)  # 截斷到小數點3位
+        )
+        # 處理缺失值
+        missing_values = ["None","none"]
+        df_all.replace(missing_values, None, inplace=True)
+        df_all.astype(object).where(pd.notnull(df_all), None)
+
+        _save_parquet(
+            df = df_all,
+            bucket = MINIO_BUCKET,
+            object_name = goal_object_name
+        )
+
+    summary = text_summary(success, retry, failed)
+    slack_text_notify(summary)
+
+if __name__ == "__main__":
+    main()
+    countdown(10)
+
+sys.exit()
