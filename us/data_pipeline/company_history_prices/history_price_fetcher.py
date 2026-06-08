@@ -3,7 +3,6 @@ import sys
 import asyncio
 
 import time
-from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import random
@@ -19,11 +18,7 @@ import duckdb
 
 from botocore.exceptions import ClientError
 
-from yfinance.exceptions import (
-    YFInvalidPeriodError,
-    YFRateLimitError,
-    YFTickerMissingError
-)
+from yfinance.exceptions import YFRateLimitError, YFTickerMissingError, YFInvalidPeriodError
 
 from ...notify.slack_notify import slack_text_notify
 from ...config.minio_conn import s3_client, MINIO_BUCKET
@@ -32,17 +27,17 @@ from ...utils.helpers import countdown
 logger = logging.getLogger(__name__)
 
 #  存 Parquet（success）
-def _save_parquet(
+def _save_one_ticket_parquet(
         ticker: str,
+        df: pd.DataFrame,
         bucket: str,
         object_name: str,
-        df: pd.DataFrame
     ) -> bool:
 
     try:
-        buf = io.BytesIO()
-        df.to_parquet(buf, index=False, engine="pyarrow")
-        buf.seek(0)
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, index=False, engine="pyarrow")
+        buffer.seek(0)
 
         try:
             s3_client.head_bucket(Bucket = bucket)
@@ -52,7 +47,7 @@ def _save_parquet(
         s3_client.put_object(
             Bucket = bucket,
             Key = object_name,
-            Body = buf,
+            Body = buffer,
         )
         logger.info(f"{ticker}: 已存入 {bucket}/{object_name}")
         return True
@@ -62,13 +57,13 @@ def _save_parquet(
         return False
 
 
-def get_latest_parquet_buffer_this_month(
-        bucket: str,
-        prefix: str = "",
+def get_one_parquet_buffer(
+    bucket: str,
+    object_name: str,
     ) -> dict | None:
+
     """
-    從 MinIO 列出指定 bucket/prefix 下，本月份的 .parquet 檔案，
-    回傳 last_modified 最新的一筆（含 BytesIO buffer）。
+    從 MinIO 讀取指定 bucket/key 的 .parquet 檔案，回傳含 BytesIO buffer 的 dict。
 
     Returns:
         dict | None，包含：
@@ -76,46 +71,28 @@ def get_latest_parquet_buffer_this_month(
             - last_modified (datetime): 最後修改時間（台灣時區 UTC+8）
             - size          (int)     : 檔案大小（bytes）
             - buffer        (BytesIO) : Parquet 內容，指標在位置 0
-        若本月無符合檔案則回傳 None。
+        若讀取失敗則回傳 None。
     """
-    tz_taipei   = ZoneInfo("Asia/Taipei")
-    now         = datetime.now(tz_taipei)
-    this_year   = now.year
-    this_month  = now.month
-
-    response = s3_client.list_objects(Bucket=bucket, Prefix=prefix)
-    objects  = response.get("Contents", [])
-
-    # 篩選本月份候選物件，依 last_modified 排序取最新
-    candidates = [
-        obj for obj in objects
-        if obj["Key"].endswith(".parquet")
-        and "final_all" not in obj["Key"]
-        and obj["LastModified"].astimezone(tz_taipei).year  == this_year
-        and obj["LastModified"].astimezone(tz_taipei).month == this_month
-    ]
-
-    if not candidates:
-        logger.info("本月無符合的 .parquet 檔案")
-        return None
-
-    latest = max(candidates, key=lambda o: o["LastModified"])
+    tz_taipei = ZoneInfo("Asia/Taipei")
 
     try:
-        res    = s3_client.get_object(Bucket=bucket, Key=latest["Key"])
+        res = s3_client.get_object(
+            Bucket=bucket,
+            Key=object_name
+        )
         buffer = io.BytesIO(res["Body"].read())
         buffer.seek(0)
         result = {
-            "object_name":   latest["Key"],
-            "last_modified": latest["LastModified"].astimezone(tz_taipei),
-            "size":          latest["Size"],
+            "object_name":   object_name,
+            "last_modified": res["LastModified"].astimezone(tz_taipei),
+            "size":          res["ContentLength"],
             "buffer":        buffer,
         }
-        logger.info(f"✓ 最新檔案：{latest['Key']}")
+        logger.info(f"✓ 讀取成功：{object_name}")
         return result
 
     except Exception as e:
-        logger.warning(f"✗ 讀取失敗 {latest['Key']}: {e}")
+        logger.warning(f"✗ 讀取失敗 {object_name}: {e}")
         return None
 
 # 同步，抓資料
@@ -208,11 +185,11 @@ async def fetch_all(tickers: list):
             # _save_parquet 是同步函式，包進執行緒池避免阻塞 event loop
             await loop.run_in_executor(
                 None,
-                lambda: _save_parquet(
+                lambda: _save_one_ticket_parquet(
                     crawl_result["ticker"],
+                    crawl_result["df"],
                     MINIO_BUCKET,
                     f"stock/history/prices/bronze/{crawl_result['ticker']}.parquet",
-                    crawl_result["df"]
                 )
             )
 
@@ -293,10 +270,10 @@ def text_summary(success, retry, failed) -> str:
     return "\n".join(lines)
 
 def main():
-    # 1. 取得本月檔案 buffer 列表
-    parquet_file = get_latest_parquet_buffer_this_month(
+    # 1. 取得指定檔案 buffer 列表
+    parquet_file = get_one_parquet_buffer(
         bucket= MINIO_BUCKET,
-        prefix= "stock/screening/"
+        object_name= f"stock/screening/us_all_co_screen.parquet"
     )
     
     if parquet_file:
@@ -307,7 +284,8 @@ def main():
         conn.register("us_co_screen", arrow_table)
 
         df = conn.execute(f"""
-            SELECT * FROM "us_co_screen" 
+            SELECT * FROM "us_co_screen"
+            WHERE "紀錄日期" >= CURRENT_DATE - INTERVAL '2 years'
         """).df()
 
         tickers = df["股票代碼"].tolist()

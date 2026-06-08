@@ -32,10 +32,10 @@ def _upload_df_as_parquet(
 ) -> bool:
     """DuckDB 清洗（Date::DATE）→ PyArrow Table → 上傳至 MinIO。"""
     try:
-        conn.register("_upload_df", df)
+        conn.register("upload_df", df)
         arrow_table = conn.execute("""
             SELECT "Date"::DATE AS "Date", * EXCLUDE ("Date")
-            FROM _upload_df
+            FROM upload_df
         """).to_arrow_table()
 
         buf = io.BytesIO()
@@ -246,115 +246,81 @@ def upsert_parquet(
     try:
         conn.register("old_df", old_df)
 
-        # merged_arrow = conn.execute(f"""
-        #     SELECT DISTINCT ON ("Date", "ticker", "period")
-        #         "Date"::DATE AS "Date",         -- 確保輸出型別為 date32
-        #         * EXCLUDE ("Date")
-        #     FROM (
-        #         -- ── 4b：保留 old_df 中不在更新名單的 ticker ────────────────
-        #         SELECT * FROM old_df
-        #         WHERE "ticker" NOT IN ({tickers_literal})
-
-        #         UNION ALL
-
-        #         -- ── 4b：在更新名單的 ticker，排除最新 2 筆 ─────────────────
-        #         SELECT * EXCLUDE (_rn) FROM (
-        #             SELECT *,
-        #                 ROW_NUMBER() OVER (
-        #                     PARTITION BY "ticker"
-        #                     ORDER BY "Date" DESC
-        #                 ) AS _rn
-        #             FROM old_df
-        #             WHERE "ticker" IN ({tickers_literal})
-        #         )
-        #         WHERE _rn > 2
-
-        #         UNION ALL
-
-        #         -- ── 4c：合併 temp.parquet 新資料 ─────────────────────────
-        #         SELECT * FROM temp_parquet
-        #     )
-        #     QUALIFY ROW_NUMBER() OVER (
-        #         PARTITION BY "Date", "ticker", "period"
-        #         ORDER BY "Date" DESC            -- 衝突時取最新一筆
-        #     ) = 1
-        #     ORDER BY "ticker", "Date"
-        # """).to_arrow_table()                   # 全程不落地 pandas
         merged_arrow = conn.execute(f"""
 
-                    /*
-                    * 最外層 SELECT：對合併後的全部資料做去重
-                    *   - DISTINCT ON ("Date", "ticker", "period")
-                    *     每個 (日期 × ticker × 週期) 組合只保留一筆
-                    *   - "Date"::DATE 確保輸出型別為 date32
-                    *   - * EXCLUDE ("Date", _priority) 移除輔助欄 _priority，
-                    *     不輸出到最終結果
-                    */
-                    SELECT DISTINCT ON ("Date", "ticker", "period")
-                        "Date"::DATE AS "Date",
-                        * EXCLUDE ("Date", _priority)
-                    FROM (
+            /*
+            * 最外層 SELECT：對合併後的全部資料做去重
+            *   - DISTINCT ON ("Date", "ticker", "period")
+            *     每個 (日期 × ticker × 週期) 組合只保留一筆
+            *   - "Date"::DATE 確保輸出型別為 date32
+            *   - * EXCLUDE ("Date", _priority) 移除輔助欄 _priority，
+            *     不輸出到最終結果
+            */
+            SELECT DISTINCT ON ("Date", "ticker", "period")
+                "Date"::DATE AS "Date",
+                * EXCLUDE ("Date", _priority)
+            FROM (
 
-                        /*
-                        * 區塊 1：不在更新名單的 ticker → 全數保留
-                        *   _priority = 1（最高優先）
-                        *   用途：這部分資料不受本次更新影響，
-                        *         即使衝突也應優先保留
-                        */
-                        SELECT *, 1 AS _priority FROM old_df
-                        WHERE "ticker" NOT IN ({tickers_literal})
+                /*
+                * 區塊 1：不在更新名單的 ticker → 全數保留
+                *   _priority = 1（最高優先）
+                *   用途：這部分資料不受本次更新影響，
+                *         即使衝突也應優先保留
+                */
+                SELECT *, 1 AS _priority FROM old_df
+                WHERE "ticker" NOT IN ({tickers_literal})
 
-                        UNION ALL
+                UNION ALL
 
-                        /*
-                        * 區塊 2：在更新名單的 ticker → 排除最新 2 筆後保留
-                        *   _priority = 2（次高優先）
-                        *   用途：保留不受本次新資料影響的歷史舊資料，
-                        *         若與區塊 1 衝突（理論上不會）仍輸給區塊 1
-                        *   EXCLUDE (_rn) 移除輔助排序欄，不帶入後續處理
-                        */
-                        SELECT * EXCLUDE (_rn), 2 AS _priority FROM (
-                            SELECT *,
-                                ROW_NUMBER() OVER (
-                                    PARTITION BY "ticker"
-                                    ORDER BY "Date" DESC
-                                ) AS _rn
-                            FROM old_df
-                            WHERE "ticker" IN ({tickers_literal})
-                        )
-                        WHERE _rn > 2
+                /*
+                * 區塊 2：在更新名單的 ticker → 排除最新 2 筆後保留
+                *   _priority = 2（次高優先）
+                *   用途：保留不受本次新資料影響的歷史舊資料，
+                *         若與區塊 1 衝突（理論上不會）仍輸給區塊 1
+                *   EXCLUDE (_rn) 移除輔助排序欄，不帶入後續處理
+                */
+                SELECT * EXCLUDE (_rn), 2 AS _priority FROM (
+                    SELECT *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY "ticker"
+                            ORDER BY "Date" DESC
+                        ) AS _rn
+                    FROM old_df
+                    WHERE "ticker" IN ({tickers_literal})
+                )
+                WHERE _rn > 2
 
-                        UNION ALL
+                UNION ALL
 
-                        /*
-                        * 區塊 3：temp.parquet 新資料
-                        *   _priority = 3（最低優先）
-                        *   用途：本次抓取的新資料，
-                        *         遇到舊資料衝突時跳過（DO NOTHING 語義），
-                        *         只補入舊資料不存在的 (Date, ticker, period) 組合
-                        */
-                        SELECT *, 3 AS _priority FROM temp_parquet
-                    )
+                /*
+                * 區塊 3：temp.parquet 新資料
+                *   _priority = 3（最低優先）
+                *   用途：本次抓取的新資料，
+                *         遇到舊資料衝突時跳過（DO NOTHING 語義），
+                *         只補入舊資料不存在的 (Date, ticker, period) 組合
+                */
+                SELECT *, 3 AS _priority FROM temp_parquet
+            )
 
-                    /*
-                    * QUALIFY：依 _priority 決定衝突時的勝出者
-                    *   ORDER BY _priority ASC → 數字最小（優先權最高）的那筆排名第一
-                    *   = 1 → 每組只保留排名第一的資料列
-                    *
-                    *   對應 PostgreSQL 語義：
-                    *     區塊1/2（舊資料）= 先插入者
-                    *     區塊3（新資料）  = 後插入者
-                    *     → 等同 ON CONFLICT DO NOTHING（後來者遇衝突跳過）
-                    */
-                    QUALIFY ROW_NUMBER() OVER (
-                        PARTITION BY "Date", "ticker", "period"
-                        ORDER BY _priority ASC
-                    ) = 1
+            /*
+            * QUALIFY：依 _priority 決定衝突時的勝出者
+            *   ORDER BY _priority ASC → 數字最小（優先權最高）的那筆排名第一
+            *   = 1 → 每組只保留排名第一的資料列
+            *
+            *   對應 PostgreSQL 語義：
+            *     區塊1/2（舊資料）= 先插入者
+            *     區塊3（新資料）  = 後插入者
+            *     → 等同 ON CONFLICT DO NOTHING（後來者遇衝突跳過）
+            */
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY "Date", "ticker", "period"
+                ORDER BY _priority ASC
+            ) = 1
 
-                    -- 最終依 ticker → Date 升冪排序
-                    ORDER BY "ticker", "Date"
+            -- 最終依 ticker → Date 升冪排序
+            ORDER BY "ticker", "Date"
 
-                """).to_arrow_table()   # 直接輸出 PyArrow Table，全程不經過 pandas
+        """).to_arrow_table()   # 直接輸出 PyArrow Table，全程不經過 pandas
 
     except Exception as e:
         logger.error(f"DuckDB merge 失敗 - {e}", exc_info=True)

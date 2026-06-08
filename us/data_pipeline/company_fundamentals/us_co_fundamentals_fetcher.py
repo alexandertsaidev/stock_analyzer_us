@@ -8,7 +8,12 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+
 import yfinance as yf
+
+import duckdb
+import pyarrow.parquet as pq
+
 from botocore.exceptions import ClientError
 from yfinance.exceptions import YFRateLimitError, YFTickerMissingError, YFInvalidPeriodError
 
@@ -19,20 +24,39 @@ from ...utils.helpers import countdown
 
 logger = logging.getLogger(__name__)
 
+def _get_buffer(
+    bucket: str,
+    object_name: str,
+    ) -> io.BytesIO | None:
+
+    try:
+        res = s3_client.get_object(
+            Bucket=bucket,
+            Key=object_name
+        )
+        buffer = io.BytesIO(res["Body"].read())
+        buffer.seek(0)
+        return buffer
+    
+    except ClientError as e:
+        if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
+            return None
+        raise
+
 # 1. 取得 ticker 清單
 def get_co_list(
     bucket: str,
     object_name: str
-) -> list[str]:
+    ) -> list[str]:
 
     try:
         response = s3_client.get_object(
             Bucket=bucket, 
             Key=object_name
         )
-        buf = io.BytesIO(response["Body"].read())
+        buffer = io.BytesIO(response["Body"].read())
 
-        df = pd.read_parquet(buf, engine="pyarrow", columns=["ticker", "is_active"])
+        df = pd.read_parquet(buffer, engine="pyarrow", columns=["ticker", "is_active"])
         df = df[df["is_active"] == True]
 
         tickers = df["ticker"].tolist()
@@ -43,17 +67,16 @@ def get_co_list(
         logger.error(f"MinIO 讀取失敗 ({bucket}/{object_name}): {e}", exc_info=True)
         raise
 
-# 2. 儲存單一 ticker 基本面 Parquet → MinIO（同步）
-def _save_parquet(
+def _save_parquet_to_minio(
     df: pd.DataFrame,
     bucket: str,
     object_name: str,
     ) -> bool:
 
     try:
-        buf = io.BytesIO()
-        df.to_parquet(buf, index=False, engine="pyarrow")
-        buf.seek(0)
+        buffer = io.BytesIO()
+        df.to_parquet(buffer, index=False, engine="pyarrow")
+        buffer.seek(0)
 
         try:
             s3_client.head_bucket(Bucket=bucket)
@@ -63,7 +86,7 @@ def _save_parquet(
         s3_client.put_object(
             Bucket = bucket,
             Key = object_name,
-            Body = buf,
+            Body = buffer,
         )
         logger.info(f"已存入 {bucket}/{object_name}，共 {len(df)} 筆")
         return True
@@ -71,6 +94,66 @@ def _save_parquet(
     except Exception as e:
         logger.error(f"MinIO 上傳失敗 - {e}", exc_info=True)
         return False
+
+def _upsert_parquet_to_minio(
+    df_new: pd.DataFrame,
+    bucket: str,
+    temp_object_name: str,
+    final_object_name: str,
+    ) -> bool:
+
+    """
+    1. 新資料存成 temp.parquet
+    2. 用 DuckDB SQL upsert 進 master parquet
+       - 重複的 (紀錄日期, ticker) → 新資料覆蓋
+       - 新增的 → append
+    3. 結果寫回 master.parquet
+    """
+    try:
+        # Step 1：存 temp
+        if not _save_parquet_to_minio(df_new, bucket, temp_object_name):
+            logger.error("temp 存檔失敗，中止 upsert")
+            return False
+
+        # Step 2：從 MinIO 讀出兩個 buffer
+        buffer_temp  = _get_buffer(MINIO_BUCKET, temp_object_name)
+        buffer_final = _get_buffer(MINIO_BUCKET, final_object_name)
+
+        # Step 3：DuckDB SQL upsert
+        conn = duckdb.connect()
+
+        conn.register("temp_data", pq.read_table(buffer_temp))
+
+        if buffer_final:
+            conn.register("final_data", pq.read_table(buffer_final))
+
+            df_merged = conn.execute("""
+                -- 保留 master 中不衝突的舊資料
+                SELECT * FROM final_data
+                WHERE ("紀錄日期", "股票代碼") NOT IN (
+                    SELECT "紀錄日期", "股票代碼" FROM temp_data
+                )
+                UNION ALL
+                
+                -- 全部新資料（覆蓋 + 新增）
+                SELECT * FROM temp_data
+            """).df()
+
+            logger.info(f"Upsert 完成，合併後共 {len(df_merged)} 筆")
+        else:
+            # final 不存在，直接以 temp 作為初始 final
+            df_merged = conn.execute("SELECT * FROM temp_data").df()
+            logger.info(f"本次未找到之前的 us_all_co_fundamentals.parquet ...\n正在初始化 {len(df_merged)} 筆")
+
+        conn.close()
+
+        # Step 4：寫回 final
+        return _save_parquet_to_minio(df_merged, bucket, final_object_name)
+
+    except Exception as e:
+        logger.error(f"Upsert 失敗 - {e}", exc_info=True)
+        return False
+
 
 # 3. 抓單一 ticker 基本面（同步）
 def fetch_fund(ticker: str) -> dict:
@@ -258,8 +341,6 @@ def text_summary(success, retry, failed) -> str:
 # 7. Entry point
 def main():
 
-    goal_object_name = f"stock/fundamentals/{date.today()}_us_fundamentals.parquet"
-
     tickers = get_co_list(
         MINIO_BUCKET,
         f"stock/company_list/us_tickers_list.parquet"
@@ -291,10 +372,11 @@ def main():
         df_all.replace(missing_values, None, inplace=True)
         df_all.astype(object).where(pd.notnull(df_all), None)
 
-        _save_parquet(
-            df = df_all,
-            bucket = MINIO_BUCKET,
-            object_name = goal_object_name
+        _upsert_parquet_to_minio(
+            df_new             = df_all,
+            bucket             = MINIO_BUCKET,
+            temp_object_name   = f"stock/fundamentals/temp_us_co_fundamentals.parquet",
+            final_object_name  = f"stock/fundamentals/us_all_co_fundamentals.parquet",
         )
 
     summary = text_summary(success, retry, failed)
