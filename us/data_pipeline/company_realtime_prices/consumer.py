@@ -5,7 +5,8 @@ import threading
 import json
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from kafka import KafkaConsumer
 
@@ -80,8 +81,8 @@ def run_minio_consumer(consumer_id):
                 groups[record["s"]].append(record)
 
             # ── 取當下時間，作為檔案命名依據 ─────────────────────
-            ts = datetime.now().strftime("%Y-%m-%d/%H-%M-%S")
-
+            # ts = datetime.now().strftime("%Y-%m-%d/%H-%M-%S")
+            ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d/%H-%M-%S")
             for symbol, records in groups.items():
 
                 # ── 序列化成 JSON Lines（每行一筆 JSON）─────────
@@ -112,4 +113,17 @@ def run_minio_consumer(consumer_id):
             buf = []
             last_flush = time.time()
 
+def run_monitor_consumer():
+    consumer = make_consumer("monitor-consumer")
 
+    for msg in consumer:
+        trade = msg.value
+        # ts    = datetime.fromtimestamp(trade["t"] / 1000).strftime("%H:%M:%S")
+        ts = datetime.fromtimestamp(trade["t"] / 1000, tz=ZoneInfo("America/New_York")).strftime("%H:%M:%S")
+        print(f"[{ts}]  {trade['s']:<6}  {trade['p']:>10.2f}  vol:{trade['v']}")
+
+if __name__ == "__main__":
+    targets = [run_minio_consumer, run_monitor_consumer]
+    threads = [threading.Thread(target=t, daemon=True) for t in targets]
+    [t.start() for t in threads]
+    [t.join()  for t in threads]

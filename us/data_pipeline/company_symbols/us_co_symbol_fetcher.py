@@ -1,5 +1,3 @@
-# scrape_us_co_symbol.py - 改為存 MinIO Parquet
-
 import io
 import time
 import random
@@ -17,12 +15,12 @@ import sys
 
 logger = logging.getLogger(__name__)
 
-# ── 1. 爬蟲 ──────────────────────────────────────────────────────────────
+# 爬蟲
 def scrape_US_tickers(
     url="https://www.sec.gov/files/company_tickers.json",
     retries=5,
     sleep_range=(1, 10)
-):
+    ):
 
     attempt = 0
     data_json = None
@@ -51,7 +49,7 @@ def scrape_US_tickers(
 def _load_existing(
     bucket: str,
     object_name: str
-) -> pd.DataFrame | None:
+    ) -> pd.DataFrame | None:
     
     try:
         response = s3_client.get_object(Bucket=bucket, Key=object_name)
@@ -71,7 +69,7 @@ def _upsert_df(
     existing: pd.DataFrame | None,
     new: pd.DataFrame,
     batch_timestamp: datetime
-) -> pd.DataFrame:
+    ) -> pd.DataFrame:
 
     if existing is None:
         # 第一次，全部為 active
@@ -97,7 +95,8 @@ def _save_parquet(
     df: pd.DataFrame, 
     bucket: str,
     object_name: str
-):
+    ):
+
     try:
         buf = io.BytesIO()
         df.to_parquet(buf, index=False, engine="pyarrow")
@@ -126,7 +125,7 @@ def upsert_co_list(
     json_data,
     bucket: str,
     object_name: str
-):
+    ):
 
     if not json_data:
         logger.warning("json_data 為空，略過")
@@ -134,7 +133,6 @@ def upsert_co_list(
 
     batch_timestamp = datetime.now()
 
-    # 原 PostgreSQL 欄位完全保留
     new_df = pd.DataFrame([
         {
             "cik":          row["cik_str"],

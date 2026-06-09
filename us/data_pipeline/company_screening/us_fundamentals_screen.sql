@@ -1,6 +1,6 @@
 SELECT *
 FROM (
-    SELECT "紀錄日期","股票代碼",
+    SELECT "created_at","ticker",
         CASE
             WHEN( ("市值" >= 1000000000)
                 AND ("市銷率P/S" >= 2 AND "市銷率P/S" <= 10)
@@ -38,7 +38,7 @@ FROM (
                 AND ("機構持股比例" >= 0.4 AND "機構持股比例" < 0.95)
                 AND ("分析師平均評級/analystRatingMean" >= 3))
                 THEN 'Distressed'
-            WHEN( ("股票代碼" IN ('AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'NFLX'))
+            WHEN( ("ticker" IN ('AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'NFLX'))
                 )
                 THEN 'Magnificent_8'
             --WHEN( ("歷史新高率" <= 10)

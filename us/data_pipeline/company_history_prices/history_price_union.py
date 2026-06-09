@@ -29,8 +29,10 @@ def _upload_df_as_parquet(
         bucket: str,
         object_name: str,
         df: pd.DataFrame,
-) -> bool:
+    ) -> bool:
+
     """DuckDB 清洗（Date::DATE）→ PyArrow Table → 上傳至 MinIO。"""
+    
     try:
         conn.register("upload_df", df)
         arrow_table = conn.execute("""

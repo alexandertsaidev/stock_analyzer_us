@@ -29,9 +29,12 @@ producer = KafkaProducer(
 # ---- Graceful Shutdown：收到 Ctrl+C 或 SIGTERM 時安全關閉 ----
 def shutdown(sig, frame):
     print("⛔ 關閉中...")
-    ws.close()           # 關閉 WebSocket 連線
-    producer.flush()     # 將緩衝區剩餘資料全部送出
-    producer.close()     # 關閉 Producer
+    try:
+        ws.close()           # 關閉 WebSocket 連線
+    except Exception:
+        pass                 # ws 尚未建立或已關閉，忽略
+    producer.flush()         # 將緩衝區剩餘資料全部送出
+    producer.close()         # 關閉 Producer
     sys.exit(0)
 
 signal.signal(signal.SIGINT, shutdown)   # 對應 Ctrl+C
@@ -60,7 +63,10 @@ def on_message(ws, message):
                     value=trade,        # 整包 trade dict，自動 JSON 序列化
                     key=trade.get("s"), # 用 symbol 當 partition key，確保同股票進同 partition
                 )
-                # 非同步發送，透過 callback 捕捉失敗
+                # 非同步發送，透過 callback 確認結果
+                future.add_callback(
+                    lambda m, s=trade.get("s"): print(f"✅ Produced | {s} | partition={m.partition} | offset={m.offset}")
+                )
                 future.add_errback(lambda e: print(f"⚠️ Kafka 發送失敗: {e}"))
     except (json.JSONDecodeError, KeyError) as e:
         # 避免壞掉的訊息讓整個程式 crash
@@ -77,17 +83,10 @@ def on_error(ws, error):
     ws.close()  # 主動關閉，避免殭屍連線，讓 reconnect 機制接手
 
 def on_close(ws, close_status_code, close_msg):
-    """連線關閉時：取消訂閱、檢查重連次數、清空 Producer 緩衝區"""
+    """連線關閉時：檢查重連次數、清空 Producer 緩衝區"""
     global retry_count
     retry_count += 1
-    print("🔌 連線關閉")
-
-    # 嘗試告知 server 取消訂閱（連線可能已斷，所以用 try/except）
-    for symbol in SYMBOLS:
-        try:
-            ws.send(json.dumps({"type": "unsubscribe", "symbol": symbol}))
-        except:
-            pass  # 連線已斷就忽略，不影響後續流程
+    print(f"🔌 連線關閉（第 {retry_count} 次）")
 
     # 超過重連上限則強制停止
     if retry_count >= MAX_RETRIES:
@@ -97,8 +96,8 @@ def on_close(ws, close_status_code, close_msg):
         sys.exit(1)
 
     # 每次關閉都確保緩衝區資料送出
+    # ⚠️ 注意：不呼叫 producer.close()，讓 producer 在重連後繼續使用
     producer.flush()
-    producer.close()
 
 # ---- 啟動 WebSocket ----
 ws = websocket.WebSocketApp(

@@ -1,5 +1,3 @@
-import pandas as pd
-
 import time
 from datetime import datetime , timedelta
 
@@ -8,7 +6,17 @@ from pathlib import Path
 import sys
 import os
 
+import duckdb
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+import logging
+from botocore.exceptions import ClientError
+
 import fnmatch
+
+
 
 def countdown(seconds):
     for i in range(seconds, 0, -1):
@@ -115,15 +123,75 @@ def get_time_str(mode):
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
-# k = get_time_str("ym")
+def get_pa_table(
+    conn: duckdb.DuckDBPyConnection,
+    bucket: str,
+    object_name: str
+    ) -> pa.Table:
+    
+    logger = logging.getLogger(__name__)
 
-# files = find_recent_files(f"D:\\past\\stock_info_311_Project\\US_\\goal_screener\\","20260125*.csv",top_n=None, days=None)
+    try:
+        pa_table = conn.execute(f"""
+            SELECT *
+            FROM read_parquet('s3://{bucket}/{object_name}')
+        """).to_arrow_table()
+        
+        logger.info(f"從 {bucket}/{object_name} 取得 {pa_table.num_rows} 檔")
+        return pa_table
 
-# # latest = max(files.values(), key=lambda x: x["mtime"])
-# # df = pd.read_csv(latest["full_path"])
+    except duckdb.HTTPException as e:
+        if "404" in str(e):
+            logger.warning(f"s3://{bucket}/{object_name} 不存在，視為首次執行")
+            raise FileNotFoundError(f"找不到檔案: s3://{bucket}/{object_name}") from e  # 維持原本行為
+        else:
+            logger.error(f"DuckDB 讀取 S3 失敗 ({bucket}/{object_name}): {e}", exc_info=True)
+            raise  # 403 / 其他錯誤 → 讓 Airflow fail
 
-# # ticker_list = df["股票代碼"].dropna().str.strip().tolist()
+    except ClientError as e:
+        # 保留 boto3 ClientError，以防其他地方仍用 s3_client
+        logger.error(f"MinIO 讀取失敗 ({bucket}/{object_name}): {e}", exc_info=True)
+        raise
 
-# for file_name, info in files.items():
-#     print(f"{file_name} -> {info['full_path']} ({info['mtime']})")
-#     print(Path(info['full_path']).parent.parent.name)
+    except Exception as e:
+        logger.error(f"讀取 {bucket}/{object_name} 發生未知錯誤: {e}", exc_info=True)
+        raise
+
+
+# def get_one_parquet_buffer(
+#     bucket: str,
+#     object_name: str,
+#     ) -> dict | None:
+
+#     """
+#     從 MinIO 讀取指定 bucket/key 的 .parquet 檔案，回傳含 BytesIO buffer 的 dict。
+
+#     Returns:
+#         dict | None，包含：
+#             - object_name   (str)     : MinIO 完整物件路徑
+#             - last_modified (datetime): 最後修改時間（台灣時區 UTC+8）
+#             - size          (int)     : 檔案大小（bytes）
+#             - buffer        (BytesIO) : Parquet 內容，指標在位置 0
+#         若讀取失敗則回傳 None。
+#     """
+#     tz_taipei = ZoneInfo("Asia/Taipei")
+
+#     try:
+#         response = s3_client.get_object(
+#             Bucket=bucket,
+#             Key=object_name
+#         )
+#         buffer = io.BytesIO(response["Body"].read())
+#         buffer.seek(0)
+#         result = {
+#             "object_name":   object_name,
+#             "last_modified": response["LastModified"].astimezone(tz_taipei),
+#             "size":          response["ContentLength"],
+#             "buffer":        buffer,
+#         }
+#         logger.info(f"✓ 讀取成功：{object_name}")
+#         return result
+
+#     except Exception as e:
+#         logger.warning(f"✗ 讀取失敗 {object_name}: {e}")
+#         return None

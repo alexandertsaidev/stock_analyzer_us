@@ -3,12 +3,12 @@ import sys
 import asyncio
 
 import time
-from zoneinfo import ZoneInfo
 
 import random
 
 import logging
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 import pandas as pd
@@ -21,22 +21,25 @@ from botocore.exceptions import ClientError
 from yfinance.exceptions import YFRateLimitError, YFTickerMissingError, YFInvalidPeriodError
 
 from ...notify.slack_notify import slack_text_notify
+
 from ...config.minio_conn import s3_client, MINIO_BUCKET
+from ...config.minio_duckdb_conn import get_duckdb_conn
+
 from ...utils.helpers import countdown
 
 logger = logging.getLogger(__name__)
 
 #  存 Parquet（success）
 def _save_one_ticket_parquet(
-        ticker: str,
-        df: pd.DataFrame,
-        bucket: str,
-        object_name: str,
+    ticker: str,
+    arrow_table: pa.Table,  # pa = pyarrow
+    bucket: str,
+    object_name: str,
     ) -> bool:
 
     try:
         buffer = io.BytesIO()
-        df.to_parquet(buffer, index=False, engine="pyarrow")
+        pq.write_table(arrow_table, buffer, compression="snappy")
         buffer.seek(0)
 
         try:
@@ -57,43 +60,34 @@ def _save_one_ticket_parquet(
         return False
 
 
-def get_one_parquet_buffer(
+def get_co_fetch_list(
+    conn: duckdb.DuckDBPyConnection,
     bucket: str,
-    object_name: str,
-    ) -> dict | None:
-
-    """
-    從 MinIO 讀取指定 bucket/key 的 .parquet 檔案，回傳含 BytesIO buffer 的 dict。
-
-    Returns:
-        dict | None，包含：
-            - object_name   (str)     : MinIO 完整物件路徑
-            - last_modified (datetime): 最後修改時間（台灣時區 UTC+8）
-            - size          (int)     : 檔案大小（bytes）
-            - buffer        (BytesIO) : Parquet 內容，指標在位置 0
-        若讀取失敗則回傳 None。
-    """
-    tz_taipei = ZoneInfo("Asia/Taipei")
+    object_name: str
+    ) -> list[str]:
 
     try:
-        res = s3_client.get_object(
-            Bucket=bucket,
-            Key=object_name
-        )
-        buffer = io.BytesIO(res["Body"].read())
-        buffer.seek(0)
-        result = {
-            "object_name":   object_name,
-            "last_modified": res["LastModified"].astimezone(tz_taipei),
-            "size":          res["ContentLength"],
-            "buffer":        buffer,
-        }
-        logger.info(f"✓ 讀取成功：{object_name}")
-        return result
+        tickers = conn.execute(f"""
+            SELECT DISTINCT "ticker"
+            FROM read_parquet('s3://{bucket}/{object_name}')
+            WHERE "created_at" >= CURRENT_DATE - INTERVAL '2 years'
+        """).df()["ticker"].tolist()
+        
+        logger.info(f"從 {bucket}/{object_name} 取得 {len(tickers)} 檔")
+        return tickers
 
+    except duckdb.HTTPException as e:
+        logger.error(f"DuckDB 讀取 S3 失敗 ({bucket}/{object_name}): {e}", exc_info=True)
+        raise FileNotFoundError(f"找不到檔案: s3://{bucket}/{object_name}") from e
+
+    except ClientError as e:
+        # 保留 boto3 ClientError，以防其他地方仍用 s3_client
+        logger.error(f"MinIO 讀取失敗 ({bucket}/{object_name}): {e}", exc_info=True)
+        raise
     except Exception as e:
-        logger.warning(f"✗ 讀取失敗 {object_name}: {e}")
-        return None
+        logger.error(f"讀取 {bucket}/{object_name} 發生未知錯誤: {e}", exc_info=True)
+        raise
+
 
 # 同步，抓資料
 def fetch_price(ticker: str,):
@@ -187,7 +181,8 @@ async def fetch_all(tickers: list):
                 None,
                 lambda: _save_one_ticket_parquet(
                     crawl_result["ticker"],
-                    crawl_result["df"],
+                    # crawl_result["df"],
+                    pa.Table.from_pandas(crawl_result["df"], preserve_index=False),
                     MINIO_BUCKET,
                     f"stock/history/prices/bronze/{crawl_result['ticker']}.parquet",
                 )
@@ -270,33 +265,22 @@ def text_summary(success, retry, failed) -> str:
     return "\n".join(lines)
 
 def main():
-    # 1. 取得指定檔案 buffer 列表
-    parquet_file = get_one_parquet_buffer(
+
+    conn = get_duckdb_conn()
+
+    tickers = get_co_fetch_list(
+        conn = conn,
         bucket= MINIO_BUCKET,
         object_name= f"stock/screening/us_all_co_screen.parquet"
     )
-    
-    if parquet_file:
-        conn = duckdb.connect()
 
-        # BytesIO → PyArrow Table → DuckDB
-        arrow_table = pq.read_table(parquet_file["buffer"])
-        conn.register("us_co_screen", arrow_table)
+    # tickers = ["BRK-B", "V", "MA", "PG", "KO", "PEP", "PM", "MO", "TSLAp"]
+    success, retry, failed = asyncio.run(fetch_all(tickers))
 
-        df = conn.execute(f"""
-            SELECT * FROM "us_co_screen"
-            WHERE "紀錄日期" >= CURRENT_DATE - INTERVAL '2 years'
-        """).df()
+    print(f"success={len(success)}\nfailed={len(failed)}\nretry={len(retry)}")
 
-        tickers = df["股票代碼"].tolist()
-
-        # tickers = ["BRK-B", "V", "MA", "PG", "KO", "PEP", "PM", "MO", "TSLAp"]
-        success, retry, failed = asyncio.run(fetch_all(tickers))
-
-        print(f"success={len(success)}\nfailed={len(failed)}\nretry={len(retry)}")
-
-        summary = text_summary(success, retry, failed)
-        slack_text_notify(summary)
+    summary = text_summary(success, retry, failed)
+    slack_text_notify(summary)
 
     return
 

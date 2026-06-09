@@ -1,9 +1,11 @@
 import io
 import sys
 import asyncio
-import time
+
 import random
 import logging
+
+import time
 from datetime import date
 
 import numpy as np
@@ -12,70 +14,63 @@ import pandas as pd
 import yfinance as yf
 
 import duckdb
+import pyarrow as pa
 import pyarrow.parquet as pq
 
 from botocore.exceptions import ClientError
 from yfinance.exceptions import YFRateLimitError, YFTickerMissingError, YFInvalidPeriodError
 
 from ...config.minio_conn import s3_client, MINIO_BUCKET
+from ...config.minio_duckdb_conn import get_duckdb_conn
 
 from ...notify.slack_notify import slack_text_notify
+
+from ...utils.helpers import get_pa_table
 from ...utils.helpers import countdown
 
 logger = logging.getLogger(__name__)
 
-def _get_buffer(
-    bucket: str,
-    object_name: str,
-    ) -> io.BytesIO | None:
-
-    try:
-        res = s3_client.get_object(
-            Bucket=bucket,
-            Key=object_name
-        )
-        buffer = io.BytesIO(res["Body"].read())
-        buffer.seek(0)
-        return buffer
-    
-    except ClientError as e:
-        if e.response["Error"]["Code"] in ("NoSuchKey", "404"):
-            return None
-        raise
 
 # 1. 取得 ticker 清單
 def get_co_list(
+    conn: duckdb.DuckDBPyConnection,
     bucket: str,
     object_name: str
     ) -> list[str]:
 
     try:
-        response = s3_client.get_object(
-            Bucket=bucket, 
-            Key=object_name
-        )
-        buffer = io.BytesIO(response["Body"].read())
 
-        df = pd.read_parquet(buffer, engine="pyarrow", columns=["ticker", "is_active"])
-        df = df[df["is_active"] == True]
-
-        tickers = df["ticker"].tolist()
+        tickers = conn.execute(f"""
+            SELECT DISTINCT "ticker"
+            FROM read_parquet('s3://{bucket}/{object_name}')
+            WHERE "is_active" = true
+        """).df()["ticker"].tolist()
+        
         logger.info(f"從 {bucket}/{object_name} 取得 {len(tickers)} 檔")
         return tickers
 
+    except duckdb.HTTPException as e:
+        logger.error(f"DuckDB 讀取 S3 失敗 ({bucket}/{object_name}): {e}", exc_info=True)
+        raise FileNotFoundError(f"找不到檔案: s3://{bucket}/{object_name}") from e
+
     except ClientError as e:
+        # 保留 boto3 ClientError，以防其他地方仍用 s3_client
         logger.error(f"MinIO 讀取失敗 ({bucket}/{object_name}): {e}", exc_info=True)
         raise
 
+    except Exception as e:
+        logger.error(f"讀取 {bucket}/{object_name} 發生未知錯誤: {e}", exc_info=True)
+        raise
+
 def _save_parquet_to_minio(
-    df: pd.DataFrame,
+    arrow_table: pa.Table,  # pa = pyarrow
     bucket: str,
     object_name: str,
     ) -> bool:
 
     try:
         buffer = io.BytesIO()
-        df.to_parquet(buffer, index=False, engine="pyarrow")
+        pq.write_table(arrow_table, buffer, compression="snappy")
         buffer.seek(0)
 
         try:
@@ -88,7 +83,7 @@ def _save_parquet_to_minio(
             Key = object_name,
             Body = buffer,
         )
-        logger.info(f"已存入 {bucket}/{object_name}，共 {len(df)} 筆")
+        logger.info(f"已存入 {bucket}/{object_name}，共 {arrow_table.num_rows} 筆")
         return True
 
     except Exception as e:
@@ -96,6 +91,7 @@ def _save_parquet_to_minio(
         return False
 
 def _upsert_parquet_to_minio(
+    conn: duckdb.DuckDBPyConnection,
     df_new: pd.DataFrame,
     bucket: str,
     temp_object_name: str,
@@ -104,51 +100,62 @@ def _upsert_parquet_to_minio(
 
     """
     1. 新資料存成 temp.parquet
-    2. 用 DuckDB SQL upsert 進 master parquet
-       - 重複的 (紀錄日期, ticker) → 新資料覆蓋
+    2. 用 DuckDB SQL upsert 進 final parquet
+       - 重複的 (created_at, ticker) → 新資料覆蓋
        - 新增的 → append
-    3. 結果寫回 master.parquet
+    3. 結果寫回 final.parquet
     """
+    arrow_table_new = pa.Table.from_pandas(df_new, preserve_index=False)
     try:
         # Step 1：存 temp
-        if not _save_parquet_to_minio(df_new, bucket, temp_object_name):
+        if not _save_parquet_to_minio(arrow_table_new, bucket, temp_object_name):
             logger.error("temp 存檔失敗，中止 upsert")
             return False
 
-        # Step 2：從 MinIO 讀出兩個 buffer
-        buffer_temp  = _get_buffer(MINIO_BUCKET, temp_object_name)
-        buffer_final = _get_buffer(MINIO_BUCKET, final_object_name)
+        # Step 2：DuckDB SQL upsert
+        conn.register("temp_data", get_pa_table(conn, bucket, temp_object_name))
 
-        # Step 3：DuckDB SQL upsert
-        conn = duckdb.connect()
+        try:
+            final_table = get_pa_table(conn, bucket, final_object_name)
+            conn.register("final_data", final_table)
+            final_exists = True
 
-        conn.register("temp_data", pq.read_table(buffer_temp))
+        except FileNotFoundError:
+            final_exists = False
+        
+        if final_exists is True :
 
-        if buffer_final:
-            conn.register("final_data", pq.read_table(buffer_final))
-
-            df_merged = conn.execute("""
-                -- 保留 master 中不衝突的舊資料
-                SELECT * FROM final_data
-                WHERE ("紀錄日期", "股票代碼") NOT IN (
-                    SELECT "紀錄日期", "股票代碼" FROM temp_data
+            arrow_merged = conn.execute("""
+                SELECT
+                    "created_at"::DATE AS "created_at",
+                    * EXCLUDE ("created_at")
+                FROM final_data
+                WHERE ("created_at", "ticker") NOT IN (
+                    SELECT "created_at", "ticker" FROM temp_data
                 )
                 UNION ALL
-                
-                -- 全部新資料（覆蓋 + 新增）
-                SELECT * FROM temp_data
-            """).df()
+                SELECT
+                    "created_at"::DATE AS "created_at",
+                    * EXCLUDE ("created_at")
+                FROM temp_data
+            """).to_arrow_table()
 
-            logger.info(f"Upsert 完成，合併後共 {len(df_merged)} 筆")
+            logger.info(f"Upsert 完成，合併後共 {arrow_merged.num_rows} 筆")
         else:
             # final 不存在，直接以 temp 作為初始 final
-            df_merged = conn.execute("SELECT * FROM temp_data").df()
-            logger.info(f"本次未找到之前的 us_all_co_fundamentals.parquet ...\n正在初始化 {len(df_merged)} 筆")
+            arrow_merged = conn.execute("""
+                SELECT
+                    "created_at"::DATE AS "created_at",
+                    * EXCLUDE ("created_at")
+                FROM temp_data
+            """).to_arrow_table()
+
+            logger.info(f"本次未找到之前的 us_all_co_fundamentals.parquet ...\n正在初始化 {arrow_merged.num_rows} 筆")
 
         conn.close()
 
         # Step 4：寫回 final
-        return _save_parquet_to_minio(df_merged, bucket, final_object_name)
+        return _save_parquet_to_minio(arrow_merged, bucket, final_object_name)
 
     except Exception as e:
         logger.error(f"Upsert 失敗 - {e}", exc_info=True)
@@ -182,8 +189,8 @@ def fetch_fund(ticker: str) -> dict:
 
         # ── 整理欄位 ──────────────────────────
         row_data = {
-            "紀錄日期":                         date.today(),
-            "股票代碼":                          ticker,
+            "created_at":                         date.today(),
+            "ticker":                          ticker,
             "市值":                              market.get("marketCap", None),
             "本益比(trailingP/E)":               market.get("trailingPE", None),
             "預期本益比(forwardP/E)":             market.get("forwardPE", None),
@@ -340,10 +347,12 @@ def text_summary(success, retry, failed) -> str:
 
 # 7. Entry point
 def main():
+    conn = get_duckdb_conn()
 
     tickers = get_co_list(
-        MINIO_BUCKET,
-        f"stock/company_list/us_tickers_list.parquet"
+        conn = conn,
+        bucket = MINIO_BUCKET,
+        object_name = f"stock/company_list/us_tickers_list.parquet"
     )
     success, retry, failed = asyncio.run(fetch_all(tickers))
 
@@ -352,7 +361,7 @@ def main():
         rows_data = [r["row_data"] for r in success]
         df_all = pd.DataFrame(rows_data)
 
-        exclude_cols = {"紀錄日期","股票代碼","分析師建議/analystRatingKey"}
+        exclude_cols = {"created_at","ticker","分析師建議/analystRatingKey"}
         # 處理 object 欄位中的 'Infinity' 字串
         obj_cols = [c for c in df_all.select_dtypes(include="object").columns if c not in exclude_cols]
         df_all[obj_cols] = df_all[obj_cols].apply(pd.to_numeric, errors="coerce")
@@ -361,7 +370,7 @@ def main():
         df_all.replace([np.inf, -np.inf], np.nan, inplace=True)
 
         num_cols = [c for c in df_all.select_dtypes(include="number").columns if c not in exclude_cols]
-        # apply() 可以「批量操作整欄or整列」
+        # apply() ,批量操作整欄or整列
         df_all[num_cols] = (
             df_all[num_cols]
             .apply(pd.to_numeric, errors="coerce")     # pd.to_numeric() 只能處理一維(Series),每欄轉成數值,不能轉的變 NaN
@@ -371,12 +380,13 @@ def main():
         missing_values = ["None","none"]
         df_all.replace(missing_values, None, inplace=True)
         df_all.astype(object).where(pd.notnull(df_all), None)
-
+        
         _upsert_parquet_to_minio(
-            df_new             = df_all,
-            bucket             = MINIO_BUCKET,
-            temp_object_name   = f"stock/fundamentals/temp_us_co_fundamentals.parquet",
-            final_object_name  = f"stock/fundamentals/us_all_co_fundamentals.parquet",
+            conn = conn,
+            df_new = df_all,
+            bucket = MINIO_BUCKET,
+            temp_object_name = f"stock/fundamentals/temp_us_co_fundamentals.parquet",
+            final_object_name = f"stock/fundamentals/us_all_co_fundamentals.parquet",
         )
 
     summary = text_summary(success, retry, failed)
