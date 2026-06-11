@@ -49,7 +49,7 @@ jsonschema-specifications==2025.9.1
 kafka-python==2.3.2
 kiwisolver==1.4.9
 leather==0.4.1
-lxml==6.0.0
+lxml==6.1.0
 MarkupSafe==3.0.3
 mashumaro==3.17
 matplotlib==3.10.8
