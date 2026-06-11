@@ -93,7 +93,7 @@ pytz==2025.2
 PyYAML==6.0.3
 RapidFuzz==3.14.5
 referencing==0.37.0
-requests==2.32.4
+requests==2.33.0
 requests-oauthlib==2.0.0
 rpds-py==2026.5.1
 s3transfer==0.16.1
