@@ -11,42 +11,17 @@ import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from ...notify.slack_notify import slack_text_notify
+from ...notify.slack_notify import slack_pipe_notify
+
 from ...config.minio_conn import s3_client, MINIO_BUCKET
 from ...config.minio_duckdb_conn import get_duckdb_conn
 
+from ...utils.helpers import save_parquet_to_minio
 from ...utils.helpers import get_pa_table
+
 from ...utils.helpers import countdown
 
 logger = logging.getLogger(__name__)
-
-def _save_parquet_to_minio(
-    arrow_table: pa.Table,  # pa = pyarrow
-    bucket: str,
-    object_name: str,
-    ) -> bool:
-
-    try:
-        buffer = io.BytesIO()
-        pq.write_table(arrow_table, buffer, compression="snappy")
-        buffer.seek(0)
-
-        try:
-            s3_client.head_bucket(Bucket=bucket)
-        except ClientError:
-            s3_client.create_bucket(Bucket=bucket)
-
-        s3_client.put_object(
-            Bucket = bucket,
-            Key = object_name,
-            Body = buffer,
-        )
-        logger.info(f"已存入 {bucket}/{object_name}，共 {arrow_table.num_rows} 筆")
-        return True
-
-    except Exception as e:
-        logger.error(f"MinIO 上傳失敗 - {e}", exc_info=True)
-        return False
 
 
 def get_co_fund(
@@ -95,15 +70,11 @@ def _upsert_parquet_to_minio(
 
     try:
         # Step 1：存 temp
-        if not _save_parquet_to_minio(arrow_table, bucket, temp_object_name):
+        if not save_parquet_to_minio(arrow_table, bucket, temp_object_name):
             logger.error("temp 存檔失敗，中止 upsert")
             return False
 
-        # Step 2：從 MinIO 讀出兩個 buffer
-        # buffer_temp  = _get_buffer(MINIO_BUCKET, temp_object_name)
-        # buffer_final = _get_buffer(MINIO_BUCKET, final_object_name)
-
-        # Step 3：DuckDB SQL upsert
+        # Step 2：DuckDB SQL upsert
         conn.register("temp_data", get_pa_table(conn, bucket, temp_object_name))
 
         try:
@@ -146,28 +117,21 @@ def _upsert_parquet_to_minio(
         conn.close()
 
         # Step 4：寫回 final
-        return _save_parquet_to_minio(arrow_merged, bucket, final_object_name)
+        return save_parquet_to_minio(arrow_merged, bucket, final_object_name)
 
     except Exception as e:
         logger.error(f"Upsert 失敗 - {e}", exc_info=True)
         return False
 
-
-def text_summary(save_results: list[dict]) -> str:
-    success = [r for r in save_results if r["status"] == "success"]
-    failed  = [r for r in save_results if r["status"] == "failed"]
-
-    lines = ["📐==3.Gold 指標計算結果摘要=="]
-
-    lines.append(f"\n✅ 成功 ({len(success)})")
-    for r in success:
-        lines.append(f"  • {r['parquet_name']}")
-
-    lines.append(f"\n❌ 失敗 ({len(failed)})")
-    for r in failed:
-        lines.append(f"  • {r['parquet_name']}")
+def text_summary(df) -> str:
+    lines = ["📊 == 基本面抓取結果摘要 =="]
+    lines.append(f"總筆數：{len(df)}")
+    lines.append(f"日期：{df['created_at'].iloc[0]}")
+    lines.append("")
+    lines.append(df.to_string(index=False))
 
     return "\n".join(lines)
+
 
 def main():
 
@@ -196,11 +160,11 @@ def main():
     
     logger.info(f"篩選結果：{result.num_rows} 筆")
     print(result.to_pandas())
-    print(result)
 
-    # results 文字摘要（供 slack send）
-    # summary = text_summary(save_results)
-    # slack_text_notify(summary)
+    df = result.to_pandas()
+    summary = text_summary(df)
+    slack_pipe_notify(summary)
+
 
 if __name__ == "__main__":
     main()

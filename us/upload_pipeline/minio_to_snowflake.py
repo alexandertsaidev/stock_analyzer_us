@@ -9,7 +9,7 @@ from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from ..notify.slack_notify import slack_text_notify
+from ..notify.slack_notify import slack_pipe_notify
 from ..config.minio_conn import s3_client, MINIO_BUCKET
 from ..config.snowflake_conn import snow_conn
 
@@ -223,7 +223,7 @@ def main():
         )
 
         summary = buffers_to_snowflake(results, snow_conn)
-        slack_text_notify(summary) 
+        slack_pipe_notify(summary) 
 
     finally:
         snow_conn.close()

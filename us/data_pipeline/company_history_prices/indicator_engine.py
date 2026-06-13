@@ -5,7 +5,6 @@ import numpy as np
 
 import talib
 
-
 class IndicatorEngine:
 
     def __init__(self,
@@ -98,6 +97,19 @@ class IndicatorEngine:
             result["upperband"] = upper
             result["middleband"] = middle
             result["lowerband"] = lower
+
+        # Bollinger (std dev : 1.7) Bands
+        if "SD_17" in self.params:
+            tp = self.params["SD_17"]
+            upper_17, middle, lower_17 = talib.BBANDS(
+                close,
+                timeperiod=tp.get("timeperiod", 13),
+                nbdevup=tp.get("nbdevup", 1.7),
+                nbdevdn=tp.get("nbdevdn", 1.7),
+                matype=tp.get("matype", 1)
+            )
+            result["upper_1_7"] = upper_17
+            result["lower_1_7"] = lower_17
 
         # EMA
         if "EMA" in self.params:

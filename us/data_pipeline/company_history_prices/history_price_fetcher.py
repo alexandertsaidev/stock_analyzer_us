@@ -20,7 +20,7 @@ from botocore.exceptions import ClientError
 
 from yfinance.exceptions import YFRateLimitError, YFTickerMissingError, YFInvalidPeriodError
 
-from ...notify.slack_notify import slack_text_notify
+from ...notify.slack_notify import slack_pipe_notify
 
 from ...config.minio_conn import s3_client, MINIO_BUCKET
 from ...config.minio_duckdb_conn import get_duckdb_conn
@@ -280,7 +280,7 @@ def main():
     print(f"success={len(success)}\nfailed={len(failed)}\nretry={len(retry)}")
 
     summary = text_summary(success, retry, failed)
-    slack_text_notify(summary)
+    slack_pipe_notify(summary)
 
     return
 

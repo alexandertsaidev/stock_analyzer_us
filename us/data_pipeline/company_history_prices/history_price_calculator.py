@@ -14,69 +14,17 @@ import pyarrow.parquet as pq
 
 import numpy as np
 
-from botocore.exceptions import ClientError
-
-from ...notify.slack_notify import slack_text_notify
+from ...notify.slack_notify import slack_pipe_notify
 from ...config.minio_conn import s3_client, MINIO_BUCKET
 from ...config.period_indicator_config import indicator_and_period_configs
 
+from ...utils.helpers import save_df_as_parquet_to_minio
 from ...utils.helpers import countdown
 
 from .multi_period_analyzer import MultiPeriodAnalyzer
 
 logger = logging.getLogger(__name__)
 
-#  存 Parquet（success）
-def _save_parquet(
-        conn: duckdb.DuckDBPyConnection,
-        df: pd.DataFrame,
-        bucket: str,
-        object_name: str
-    ) -> bool:
-
-    try:
-        ### Step 1：DuckDB 清洗
-
-        # DataFrame → 註冊進 DuckDB 作為虛擬資料表
-        conn.register("temp_df", df)
-
-        # 執行清洗查詢：
-        #   - "Date"::DATE 確保欄位型別為 date32，避免讀回 pandas 時變成 Timestamp
-        #   - EXCLUDE ("Date") 保留其餘欄位原始順序
-        #   - WHERE 過濾四個價格欄位全為 NULL 的無效資料列
-        # 使用 to_arrow_table() 直接取得 PyArrow Table，保留 date32 型別
-        cleaned = conn.execute("""
-            SELECT
-                "Date"::DATE AS "Date",
-                *
-            EXCLUDE ("Date")
-            FROM temp_df
-        """).to_arrow_table()
-
-        ### Step 2：PyArrow Table → Parquet bytes
-
-        buf = io.BytesIO()
-        pq.write_table(cleaned, buf)
-        buf.seek(0)
-
-        ### Step 3：上傳至 MinIO
-
-        try:
-            s3_client.head_bucket(Bucket= bucket)
-        except ClientError:
-            s3_client.create_bucket(Bucket= bucket)
-
-        s3_client.put_object(
-            Bucket= bucket,
-            Key=object_name,
-            Body=buf,
-        )
-        logger.info(f"已存入 {bucket}/{object_name}")
-        return True
-
-    except Exception as e:
-        logger.error(f"處理 {bucket}/{object_name} 失敗 - {e}", exc_info=True)
-        return False
 
 def get_today_parquet_buffers(
         bucket: str,
@@ -207,20 +155,28 @@ def main():
 
         tickers_with_single_period = tickers_with_single_period.astype(object).where(pd.notnull(tickers_with_single_period), None)
         
-        ok = _save_parquet(
-            conn = duckdb.connect(),
-            df = tickers_with_single_period,
-            bucket = MINIO_BUCKET,
-            object_name = f"stock/history/prices/gold/us_{period}.parquet",
-        )
-        save_results.append({
-            "parquet_name": f"us_{period}",
-            "status": "success" if ok else "failed",
-        })
+        try:
+            save_df_as_parquet_to_minio(
+                conn = duckdb.connect(),
+                df = tickers_with_single_period,
+                bucket = MINIO_BUCKET,
+                object_name = f"stock/history/prices/gold/us_{period}.parquet",
+            )
+            save_results.append({
+                "parquet_name": f"us_{period}",
+                "status": "success",
+            })
+
+        except Exception as e:
+            save_results.append({
+                "parquet_name": f"us_{period}",
+                "status": "failed",
+            })    
 
     # results 文字摘要（供 slack send）
     summary = text_summary(save_results)
-    slack_text_notify(summary)
+    slack_pipe_notify(summary)
+
 
 if __name__ == "__main__":
     main()

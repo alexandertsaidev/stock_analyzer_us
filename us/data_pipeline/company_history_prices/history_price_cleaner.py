@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 
 from botocore.exceptions import ClientError
 
-from ...notify.slack_notify import slack_text_notify
+from ...notify.slack_notify import slack_pipe_notify
 from ...config.minio_conn import s3_client, MINIO_BUCKET
 from ...utils.helpers import countdown
 
@@ -102,12 +102,7 @@ def clean_and_upload(
             arrow_table = pq.read_table(file["buffer"])
             conn.register("temp_parquet", arrow_table)
 
-            # 執行清洗查詢：
-            #   - "Date"::DATE 確保欄位型別為 date32，避免讀回 pandas 時變成 Timestamp
-            #   - EXCLUDE ("Date") 保留其餘欄位原始順序
-            #   - WHERE 過濾四個價格欄位全為 NULL 的無效資料列
-            # 使用 fetch_arrow_table() 直接取得 PyArrow Table，
-            # 保留 date32 型別，避免經過 pandas 轉成 datetime64[ns]
+            # 執行清洗
             out_buffer = io.BytesIO()
             cleaned = conn.execute("""
                 SELECT
@@ -120,7 +115,7 @@ def clean_and_upload(
                     OR "High"  IS NOT NULL
                     OR "Low"   IS NOT NULL
                     OR "Close" IS NOT NULL
-            """).fetch_arrow_table()
+            """).to_arrow_table()
 
             # 統計清洗前後筆數，用於 log 與回傳結果
             raw_count     = conn.execute("SELECT COUNT(*) FROM temp_parquet").fetchone()[0]
@@ -215,7 +210,7 @@ def main():
 
     # 3. results 文字摘要（供 slack send）
     summary = text_summary(results)
-    slack_text_notify(summary)
+    slack_pipe_notify(summary)
 
     return
 

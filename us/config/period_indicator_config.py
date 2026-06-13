@@ -9,6 +9,7 @@ DEFAULT_INDICATOR_PARAMS = {
     "STOCH": {"fastk_period":5, "slowk_period":3, "slowd_period":3, "slowd_matype":0},
     "WILLR": {"timeperiod":7},
     "BBANDS": {"timeperiod":13, "nbdevup":2.7, "nbdevdn":2.7, "matype":1},
+    "SD_17": {"timeperiod":13, "nbdevup":1.7, "nbdevdn":1.7, "matype":1},
     "EMA": {"ema_period":[13,26]},
     "SMA": {"sma_period":[50,200]},
     "ATR": {"timeperiod":14},

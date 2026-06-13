@@ -3,11 +3,12 @@ from datetime import datetime , timedelta
 
 from pathlib import Path
 
+import io
 import sys
 import os
 
 import duckdb
-
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -15,7 +16,7 @@ import logging
 from botocore.exceptions import ClientError
 
 import fnmatch
-
+from ..config.minio_conn import s3_client
 
 
 def countdown(seconds):
@@ -156,6 +157,75 @@ def get_pa_table(
     except Exception as e:
         logger.error(f"讀取 {bucket}/{object_name} 發生未知錯誤: {e}", exc_info=True)
         raise
+
+def save_parquet_to_minio(
+    arrow_table: pa.Table,  # pa = pyarrow
+    bucket: str,
+    object_name: str,
+    ) -> bool:
+
+    logger = logging.getLogger(__name__)
+
+    try:
+        buffer = io.BytesIO()
+        pq.write_table(arrow_table, buffer, compression="snappy")
+        buffer.seek(0)
+
+        try:
+            s3_client.head_bucket(Bucket=bucket)
+        except ClientError:
+            s3_client.create_bucket(Bucket=bucket)
+
+        s3_client.put_object(
+            Bucket = bucket,
+            Key = object_name,
+            Body = buffer,
+        )
+        logger.info(f"已存入 {bucket}/{object_name}，共 {arrow_table.num_rows} 筆")
+        return True
+
+    except Exception as e:
+        logger.error(f"MinIO 上傳失敗 - {e}", exc_info=True)
+        return False
+
+def save_df_as_parquet_to_minio(
+    conn: duckdb.DuckDBPyConnection,
+    df: pd.DataFrame,
+    bucket: str,
+    object_name: str,
+    ) -> None:
+
+    logger = logging.getLogger(__name__)
+    
+    """DuckDB 清洗（Date::DATE）→ PyArrow Table → 上傳至 MinIO。"""
+    
+    try:
+        conn.register("upload_df", df)
+        arrow_table = conn.execute("""
+            SELECT "Date"::DATE AS "Date", * EXCLUDE ("Date")
+            FROM upload_df
+        """).to_arrow_table()
+
+        buffer = io.BytesIO()
+        pq.write_table(arrow_table, buffer, compression="snappy")
+        buffer.seek(0)
+
+        try:
+            s3_client.head_bucket(Bucket=bucket)
+        except ClientError:
+            s3_client.create_bucket(Bucket=bucket)
+
+        s3_client.put_object(
+            Bucket=bucket, 
+            Key=object_name,
+            Body=buffer
+        )
+        logger.info(f"✓ 上傳完成：{bucket}/{object_name}")
+
+    except Exception as e:
+        logger.error(f"✗ 上傳失敗：{object_name} - {e}", exc_info=True)
+        raise
+
 
 
 # def get_one_parquet_buffer(

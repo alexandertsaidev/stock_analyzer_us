@@ -23,8 +23,9 @@ from yfinance.exceptions import YFRateLimitError, YFTickerMissingError, YFInvali
 from ...config.minio_conn import s3_client, MINIO_BUCKET
 from ...config.minio_duckdb_conn import get_duckdb_conn
 
-from ...notify.slack_notify import slack_text_notify
+from ...notify.slack_notify import slack_pipe_notify
 
+from ...utils.helpers import save_parquet_to_minio
 from ...utils.helpers import get_pa_table
 from ...utils.helpers import countdown
 
@@ -62,33 +63,6 @@ def get_co_list(
         logger.error(f"讀取 {bucket}/{object_name} 發生未知錯誤: {e}", exc_info=True)
         raise
 
-def _save_parquet_to_minio(
-    arrow_table: pa.Table,  # pa = pyarrow
-    bucket: str,
-    object_name: str,
-    ) -> bool:
-
-    try:
-        buffer = io.BytesIO()
-        pq.write_table(arrow_table, buffer, compression="snappy")
-        buffer.seek(0)
-
-        try:
-            s3_client.head_bucket(Bucket=bucket)
-        except ClientError:
-            s3_client.create_bucket(Bucket=bucket)
-
-        s3_client.put_object(
-            Bucket = bucket,
-            Key = object_name,
-            Body = buffer,
-        )
-        logger.info(f"已存入 {bucket}/{object_name}，共 {arrow_table.num_rows} 筆")
-        return True
-
-    except Exception as e:
-        logger.error(f"MinIO 上傳失敗 - {e}", exc_info=True)
-        return False
 
 def _upsert_parquet_to_minio(
     conn: duckdb.DuckDBPyConnection,
@@ -108,7 +82,7 @@ def _upsert_parquet_to_minio(
     arrow_table_new = pa.Table.from_pandas(df_new, preserve_index=False)
     try:
         # Step 1：存 temp
-        if not _save_parquet_to_minio(arrow_table_new, bucket, temp_object_name):
+        if not save_parquet_to_minio(arrow_table_new, bucket, temp_object_name):
             logger.error("temp 存檔失敗，中止 upsert")
             return False
 
@@ -155,7 +129,7 @@ def _upsert_parquet_to_minio(
         conn.close()
 
         # Step 4：寫回 final
-        return _save_parquet_to_minio(arrow_merged, bucket, final_object_name)
+        return save_parquet_to_minio(arrow_merged, bucket, final_object_name)
 
     except Exception as e:
         logger.error(f"Upsert 失敗 - {e}", exc_info=True)
@@ -390,7 +364,7 @@ def main():
         )
 
     summary = text_summary(success, retry, failed)
-    slack_text_notify(summary)
+    slack_pipe_notify(summary)
 
 if __name__ == "__main__":
     main()
