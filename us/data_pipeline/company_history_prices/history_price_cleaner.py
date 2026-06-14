@@ -115,6 +115,8 @@ def clean_and_upload(
                     OR "High"  IS NOT NULL
                     OR "Low"   IS NOT NULL
                     OR "Close" IS NOT NULL
+                    OR "Adj Close" IS NOT NULL
+                    OR "Volume" IS NOT NULL
             """).to_arrow_table()
 
             # 統計清洗前後筆數，用於 log 與回傳結果

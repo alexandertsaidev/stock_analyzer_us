@@ -96,7 +96,7 @@ def fetch_price(ticker: str,):
 
     try:
         stock = yf.Ticker(ticker)
-        df = stock.history(period='max')
+        df = stock.history(period='max', auto_adjust=False)
 
         # 1.將 index 變成普通欄位，並自動生成新的整數 index。
         df = df.reset_index()
