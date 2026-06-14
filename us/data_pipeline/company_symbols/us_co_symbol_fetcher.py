@@ -1,8 +1,12 @@
 import io
-import time
+import sys
+
 import random
 import logging
+
+import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import requests
 import pandas as pd
@@ -10,9 +14,8 @@ from fake_useragent import UserAgent
 from botocore.exceptions import ClientError
 
 from ...config.minio_conn import s3_client, MINIO_BUCKET
-from ...utils.helpers import countdown
 
-import sys
+from ...utils.helpers import countdown
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +49,7 @@ def scrape_US_tickers(
 
     return data_json
 
-# ── 2. 讀取現有 Parquet（若存在）────────────────────────────────────────
+
 def _load_existing(
     bucket: str,
     object_name: str
@@ -65,7 +68,7 @@ def _load_existing(
             return None
         raise
 
-# ── 3. Upsert 邏輯（純 pandas）──────────────────────────────────────────
+
 def _upsert_df(
     existing: pd.DataFrame | None,
     new: pd.DataFrame,
@@ -91,7 +94,7 @@ def _upsert_df(
 
     return merged.reset_index()
 
-# ── 4. 存回 MinIO ────────────────────────────────────────────────────────
+
 def _save_parquet(
     df: pd.DataFrame, 
     bucket: str,
@@ -121,7 +124,6 @@ def _save_parquet(
         return False
 
 
-# ── 5. 主流程（對應原 upsert_co_list）──────────────────────────────────
 def upsert_co_list(
     json_data,
     bucket: str,
@@ -132,7 +134,8 @@ def upsert_co_list(
         logger.warning("json_data 為空，略過")
         return
 
-    batch_timestamp = datetime.now()
+    tz = "America/New_York"
+    batch_timestamp = datetime.now(ZoneInfo(tz)).replace(tzinfo=None)
 
     new_df = pd.DataFrame([
         {
@@ -163,7 +166,6 @@ def upsert_co_list(
     )
 
 
-# ── 6. Entry point ───────────────────────────────────────────────────────
 def main():
     
     object_name = f"stock/company_list/us_tickers_list.parquet"

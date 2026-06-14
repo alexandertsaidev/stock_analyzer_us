@@ -162,7 +162,7 @@ def save_parquet_to_minio(
     arrow_table: pa.Table,  # pa = pyarrow
     bucket: str,
     object_name: str,
-    ) -> bool:
+    ):
 
     logger = logging.getLogger(__name__)
 
@@ -182,11 +182,10 @@ def save_parquet_to_minio(
             Body = buffer,
         )
         logger.info(f"已存入 {bucket}/{object_name}，共 {arrow_table.num_rows} 筆")
-        return True
 
     except Exception as e:
         logger.error(f"MinIO 上傳失敗 - {e}", exc_info=True)
-        return False
+        raise
 
 def save_df_as_parquet_to_minio(
     conn: duckdb.DuckDBPyConnection,

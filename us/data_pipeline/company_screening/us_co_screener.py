@@ -70,9 +70,7 @@ def _upsert_parquet_to_minio(
 
     try:
         # Step 1：存 temp
-        if not save_parquet_to_minio(arrow_table, bucket, temp_object_name):
-            logger.error("temp 存檔失敗，中止 upsert")
-            return False
+        save_parquet_to_minio(arrow_table, bucket, temp_object_name)
 
         # Step 2：DuckDB SQL upsert
         conn.register("temp_data", get_pa_table(conn, bucket, temp_object_name))
@@ -112,13 +110,14 @@ def _upsert_parquet_to_minio(
                 FROM temp_data
             """).to_arrow_table()
 
-            logger.info(f"本次未找到之前的 us_all_co_fundamentals.parquet ...\n正在初始化 {arrow_merged.num_rows} 筆")
+            logger.info(f"本次未找到之前的 us_all_co_screen.parquet ...\n正在初始化 {arrow_merged.num_rows} 筆")
 
         conn.close()
 
         # Step 4：寫回 final
-        return save_parquet_to_minio(arrow_merged, bucket, final_object_name)
-
+        save_parquet_to_minio(arrow_merged, bucket, final_object_name)
+        return True
+    
     except Exception as e:
         logger.error(f"Upsert 失敗 - {e}", exc_info=True)
         return False

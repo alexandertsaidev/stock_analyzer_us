@@ -15,7 +15,10 @@ import pyarrow.parquet as pq
 import numpy as np
 
 from ...notify.slack_notify import slack_pipe_notify
+
 from ...config.minio_conn import s3_client, MINIO_BUCKET
+from ...config.minio_duckdb_conn import get_duckdb_conn
+
 from ...config.period_indicator_config import indicator_and_period_configs
 
 from ...utils.helpers import save_df_as_parquet_to_minio
@@ -157,7 +160,7 @@ def main():
         
         try:
             save_df_as_parquet_to_minio(
-                conn = duckdb.connect(),
+                conn = get_duckdb_conn(),
                 df = tickers_with_single_period,
                 bucket = MINIO_BUCKET,
                 object_name = f"stock/history/prices/gold/us_{period}.parquet",

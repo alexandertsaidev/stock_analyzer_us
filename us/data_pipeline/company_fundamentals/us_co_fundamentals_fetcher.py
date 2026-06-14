@@ -6,7 +6,8 @@ import random
 import logging
 
 import time
-from datetime import date
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -82,9 +83,7 @@ def _upsert_parquet_to_minio(
     arrow_table_new = pa.Table.from_pandas(df_new, preserve_index=False)
     try:
         # Step 1：存 temp
-        if not save_parquet_to_minio(arrow_table_new, bucket, temp_object_name):
-            logger.error("temp 存檔失敗，中止 upsert")
-            return False
+        save_parquet_to_minio(arrow_table_new, bucket, temp_object_name)
 
         # Step 2：DuckDB SQL upsert
         conn.register("temp_data", get_pa_table(conn, bucket, temp_object_name))
@@ -129,7 +128,8 @@ def _upsert_parquet_to_minio(
         conn.close()
 
         # Step 4：寫回 final
-        return save_parquet_to_minio(arrow_merged, bucket, final_object_name)
+        save_parquet_to_minio(arrow_merged, bucket, final_object_name)
+        return True
 
     except Exception as e:
         logger.error(f"Upsert 失敗 - {e}", exc_info=True)
@@ -142,6 +142,7 @@ def fetch_fund(ticker: str) -> dict:
     抓取單一 ticker 基本面資料，回傳統一格式的 result dict。
     status: "success" | "failed" | "retry"
     """
+    tz = "America/New_York"
     start = time.perf_counter()
     try:
         stock = yf.Ticker(ticker)
@@ -163,7 +164,7 @@ def fetch_fund(ticker: str) -> dict:
 
         # ── 整理欄位 ──────────────────────────
         row_data = {
-            "created_at":                         date.today(),
+            "created_at":                       datetime.now(ZoneInfo(tz)).date(),
             "ticker":                          ticker,
             "市值":                              market.get("marketCap", None),
             "本益比(trailingP/E)":               market.get("trailingPE", None),
