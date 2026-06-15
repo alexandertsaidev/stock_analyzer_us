@@ -3,6 +3,7 @@ import sys
 import asyncio
 
 import time
+from datetime import datetime
 
 import random
 
@@ -25,6 +26,7 @@ from ...notify.slack_notify import slack_pipe_notify
 from ...config.minio_conn import s3_client, MINIO_BUCKET
 from ...config.minio_duckdb_conn import get_duckdb_conn
 
+from ...utils.helpers import get_now
 from ...utils.helpers import countdown
 
 logger = logging.getLogger(__name__)
@@ -90,7 +92,7 @@ def get_co_fetch_list(
 
 
 # 同步，抓資料
-def fetch_price(ticker: str,):
+def fetch_price(ticker: str, now: datetime):
 
     start = time.perf_counter()
 
@@ -98,10 +100,12 @@ def fetch_price(ticker: str,):
         stock = yf.Ticker(ticker)
         df = stock.history(period='max', auto_adjust=False)
 
-        # 1.將 index 變成普通欄位，並自動生成新的整數 index。
+        # 1. 將 index 變成普通欄位，並自動生成新的整數 index。
         df = df.reset_index()
         # 2. 將日期轉換為 datetime 類型
         df["Date"] = pd.to_datetime(df["Date"]).dt.date
+        # 3. 增加 "created_at" datetime 類型
+        df["created_at"] = now
 
         elapse = time.perf_counter() - start
         return {
@@ -150,18 +154,18 @@ def fetch_price(ticker: str,):
         }
 
 # 非同步，包裝 fetch_price(同步)
-async def fetch_one(ticker: str):
+async def fetch_one(ticker: str, now):
     # 取得當前 event loop，避免阻塞 event loop
     loop = asyncio.get_running_loop()
     # run_in_executor 把同步函式丟進執行緒池
     result = await loop.run_in_executor(
         None,                        # None 表示使用預設的 ThreadPoolExecutor
-        lambda: fetch_price(ticker)  # 將同步函式包成 lambda 傳入執行緒
+        lambda: fetch_price(ticker, now)  # 將同步函式包成 lambda 傳入執行緒
     )
     return result
 
 # 非同步，統籌所有 fetch_one
-async def fetch_all(tickers: list):
+async def fetch_all(tickers: list, now):
     # 限制同時最多 n 個 ticker 並發執行，避免對 yfinance 發送過多請求
     sem = asyncio.Semaphore(20)
 
@@ -170,7 +174,7 @@ async def fetch_all(tickers: list):
         # 進入 semaphore，超過 n 個時自動等待，執行完畢後釋放名額
         async with sem:
             # 等這個 fetch_one 抓完，期間 event loop 可以去跑其他協程
-            crawl_result = await fetch_one(ticker)
+            crawl_result = await fetch_one(ticker, now)
 
         if crawl_result["status"] == "success":
             print(f"{crawl_result['ticker']}: 爬蟲抓取成功")  # ✅ 暫時替代
@@ -181,7 +185,6 @@ async def fetch_all(tickers: list):
                 None,
                 lambda: _save_one_ticket_parquet(
                     crawl_result["ticker"],
-                    # crawl_result["df"],
                     pa.Table.from_pandas(crawl_result["df"], preserve_index=False),
                     MINIO_BUCKET,
                     f"stock/history/prices/bronze/{crawl_result['ticker']}.parquet",
@@ -274,8 +277,10 @@ def main():
         object_name= f"stock/screening/us_all_co_screen.parquet"
     )
 
+    now = get_now(tz = "Asia/Taipei")
+
     # tickers = ["BRK-B", "V", "MA", "PG", "KO", "PEP", "PM", "MO", "TSLAp"]
-    success, retry, failed = asyncio.run(fetch_all(tickers))
+    success, retry, failed = asyncio.run(fetch_all(tickers, now))
 
     print(f"success={len(success)}\nfailed={len(failed)}\nretry={len(retry)}")
 

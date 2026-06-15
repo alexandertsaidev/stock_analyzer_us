@@ -1,5 +1,6 @@
 import time
 from datetime import datetime , timedelta
+from zoneinfo import ZoneInfo
 
 from pathlib import Path
 
@@ -124,6 +125,9 @@ def get_time_str(mode):
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
+def get_now(tz: str = "America/New_York") -> datetime:
+    return datetime.now(ZoneInfo(tz))
+
 def get_pa_table(
     conn: duckdb.DuckDBPyConnection,
     bucket: str,
@@ -226,41 +230,3 @@ def save_df_as_parquet_to_minio(
         raise
 
 
-
-# def get_one_parquet_buffer(
-#     bucket: str,
-#     object_name: str,
-#     ) -> dict | None:
-
-#     """
-#     從 MinIO 讀取指定 bucket/key 的 .parquet 檔案，回傳含 BytesIO buffer 的 dict。
-
-#     Returns:
-#         dict | None，包含：
-#             - object_name   (str)     : MinIO 完整物件路徑
-#             - last_modified (datetime): 最後修改時間（台灣時區 UTC+8）
-#             - size          (int)     : 檔案大小（bytes）
-#             - buffer        (BytesIO) : Parquet 內容，指標在位置 0
-#         若讀取失敗則回傳 None。
-#     """
-#     tz_taipei = ZoneInfo("Asia/Taipei")
-
-#     try:
-#         response = s3_client.get_object(
-#             Bucket=bucket,
-#             Key=object_name
-#         )
-#         buffer = io.BytesIO(response["Body"].read())
-#         buffer.seek(0)
-#         result = {
-#             "object_name":   object_name,
-#             "last_modified": response["LastModified"].astimezone(tz_taipei),
-#             "size":          response["ContentLength"],
-#             "buffer":        buffer,
-#         }
-#         logger.info(f"✓ 讀取成功：{object_name}")
-#         return result
-
-#     except Exception as e:
-#         logger.warning(f"✗ 讀取失敗 {object_name}: {e}")
-#         return None
