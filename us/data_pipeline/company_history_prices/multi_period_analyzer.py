@@ -43,6 +43,7 @@ class MultiPeriodAnalyzer:
 
             try:
                 ticker = df["ticker"].iloc[0]
+                created_at = df["created_at"].iloc[0]
 
                 if period == "D":
                     period_data = df
@@ -54,6 +55,7 @@ class MultiPeriodAnalyzer:
                         'High':   'max',
                         'Low':    'min',
                         'Close':  'last',
+                        'Adj Close':  'last',
                         'Volume': 'sum',
                     }).reset_index()
 
@@ -61,6 +63,7 @@ class MultiPeriodAnalyzer:
                     period_data['Date']   = pd.to_datetime(period_data['Date'])
                     period_data.set_index("Date", inplace=True, drop=False)
                     period_data["ticker"] = ticker
+                    period_data["created_at"] = created_at
 
             except Exception as e:
                 raise ValueError(f"Unsupported period: {period}, error: {e}")
