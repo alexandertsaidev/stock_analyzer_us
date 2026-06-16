@@ -134,7 +134,7 @@ def upsert_parquet(
             f"{gold_prefix}/{final_parquet}"
         )
         
-    except Exception as e:
+    except FileNotFoundError as e:
         logger.info(f"{gold_prefix}/{final_parquet} 不存在，直接以 new_df 建立")
 
         try:
@@ -149,6 +149,9 @@ def upsert_parquet(
         except Exception as e:
             logger.error(f"建立 {gold_prefix}/{final_parquet} 失敗")
             return False
+    
+    except Exception as e:
+        return False
 
     # ── Step 4a：DuckDB 讀取 temp.parquet，取得 tickers_literal ─────────────
     try:
@@ -283,14 +286,14 @@ def main():
 
     # ── upsert 合併寫入 ───────────────────────────────────────────────────────
     if tickers_with_periods:
-        conn = get_duckdb_conn()
 
-        success = upsert_parquet(
-            conn=conn,
-            bucket=MINIO_BUCKET,
-            tickers_with_periods=tickers_with_periods,
-        )
-        conn.close()
+        with get_duckdb_conn() as conn:
+
+            success = upsert_parquet(
+                conn=conn,
+                bucket=MINIO_BUCKET,
+                tickers_with_periods=tickers_with_periods,
+            )
 
         summary = text_summary(success)
         slack_pipe_notify(summary)

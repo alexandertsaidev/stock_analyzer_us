@@ -134,29 +134,29 @@ def text_summary(df) -> str:
 
 def main():
 
-    conn = get_duckdb_conn()
+    with get_duckdb_conn() as conn:
 
-    co_screen: pa.Table = get_co_fund(
-        conn = conn,
-        bucket= MINIO_BUCKET,
-        object_name= f"stock/fundamentals/temp_us_co_fundamentals.parquet"
-    )
+        co_screen: pa.Table = get_co_fund(
+            conn = conn,
+            bucket= MINIO_BUCKET,
+            object_name= f"stock/fundamentals/temp_us_co_fundamentals.parquet"
+        )
 
-    conn.register("us_co_screen", co_screen)
+        conn.register("us_co_screen", co_screen)
 
-    result = conn.execute(
-        Path("/app/stock_analyzer_us/us/data_pipeline/company_screening/us_fundamentals_screen.sql")
-        .read_text()
-    ).to_arrow_table()
+        result = conn.execute(
+            Path("/app/stock_analyzer_us/us/data_pipeline/company_screening/us_fundamentals_screen.sql")
+            .read_text()
+        ).to_arrow_table()
 
-    _upsert_parquet_to_minio(
-        conn = conn,
-        arrow_table = result,
-        bucket = MINIO_BUCKET,
-        temp_object_name = "stock/screening/temp_us_co_screen.parquet",
-        final_object_name = "stock/screening/us_all_co_screen.parquet",
-    )
-    
+        _upsert_parquet_to_minio(
+            conn = conn,
+            arrow_table = result,
+            bucket = MINIO_BUCKET,
+            temp_object_name = "stock/screening/temp_us_co_screen.parquet",
+            final_object_name = "stock/screening/us_all_co_screen.parquet",
+        )
+
     logger.info(f"篩選結果：{result.num_rows} 筆")
     print(result.to_pandas())
 

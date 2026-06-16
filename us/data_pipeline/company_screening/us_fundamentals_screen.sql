@@ -38,12 +38,22 @@ FROM (
                 AND ("機構持股比例" >= 0.4 AND "機構持股比例" < 0.95)
                 AND ("分析師平均評級/analystRatingMean" >= 3))
                 THEN 'Distressed'
+            WHEN( ("52週價格變化/priceChange52W" >= 3)
+                AND ("52週新高率" >= 0.9)
+                -- AND ("ROA(TTM)" > 0)
+                -- AND ("EPS(TTM)" > 0)
+                AND ("目前價格" >= 15)
+                AND ("上一季日均成交/avgDailyVolumeLastQuarter" >= 50000)
+                AND ("機構持股比例" >= 0.4 AND "機構持股比例" < 0.95)
+                AND ("分析師平均評級/analystRatingMean" <= 2)
+                AND ("分析師建議/analystRatingKey" IS NOT NULL))
+                THEN 'Super'
             WHEN( ("ticker" IN ('AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'NFLX'))
                 )
                 THEN 'Magnificent_8'
-            --WHEN( ("歷史新高率" <= 10)
-                --AND ("機構持股比例" >= 0.4 AND "機構持股比例" < 0.95))
-                --THEN 'Other'
+            WHEN( ("ticker" IN ('QQQ', 'SPY', 'DIA'))
+                )
+                THEN 'ETF_1'
             -- ELSE 'no_selected'
         END AS is_selected
     FROM "us_co_screen"

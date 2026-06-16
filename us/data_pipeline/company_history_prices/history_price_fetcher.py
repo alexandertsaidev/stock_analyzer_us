@@ -269,19 +269,19 @@ def text_summary(success, retry, failed) -> str:
 
 def main():
 
-    conn = get_duckdb_conn()
+    with get_duckdb_conn() as conn:
 
-    tickers = get_co_fetch_list(
-        conn = conn,
-        bucket= MINIO_BUCKET,
-        object_name= f"stock/screening/us_all_co_screen.parquet"
-    )
+        tickers = get_co_fetch_list(
+            conn = conn,
+            bucket= MINIO_BUCKET,
+            object_name= f"stock/screening/us_all_co_screen.parquet"
+        )
 
-    now = get_now(tz = "Asia/Taipei")
+    now = get_now(tz = "America/New_York")
 
     # tickers = ["BRK-B", "V", "MA", "PG", "KO", "PEP", "PM", "MO", "TSLAp"]
     success, retry, failed = asyncio.run(fetch_all(tickers, now))
-
+    
     print(f"success={len(success)}\nfailed={len(failed)}\nretry={len(retry)}")
 
     summary = text_summary(success, retry, failed)

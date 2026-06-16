@@ -200,8 +200,6 @@ def save_df_as_parquet_to_minio(
 
     logger = logging.getLogger(__name__)
     
-    """DuckDB 清洗（Date::DATE）→ PyArrow Table → 上傳至 MinIO。"""
-    
     try:
         conn.register("upload_df", df)
         arrow_table = conn.execute("""

@@ -118,63 +118,65 @@ def main():
     save_results = []
 
     # 2. 針對今日檔案 buffer 列表 對應 n個週期
-    for period, config in indicator_and_period_configs.items():
-        
-        tickers_with_single_period = []
+    with get_duckdb_conn() as conn:
 
-        for parequet_file in parquet_files:
-
-            parequet_file["buffer"].seek(0)
-            df = pd.read_parquet(parequet_file["buffer"])
-
-            # 設置ticker欄位
-            df["ticker"] = parequet_file["ticker"]
-            # 設置日期為索引
-            df.set_index("Date", inplace=True, drop=False)
-
-            print(f"\n處理：{parequet_file['object_name']}")
+        for period, config in indicator_and_period_configs.items():
             
-            # calculate df
-            analyzer = MultiPeriodAnalyzer()
-            single_ticker_single_period = analyzer.run_single_period_with_ticker(
-                df,
-                period,
-                config
+            tickers_with_single_period = []
+
+            for parequet_file in parquet_files:
+
+                parequet_file["buffer"].seek(0)
+                df = pd.read_parquet(parequet_file["buffer"])
+
+                # 設置ticker欄位
+                df["ticker"] = parequet_file["ticker"]
+                # 設置日期為索引
+                df.set_index("Date", inplace=True, drop=False)
+
+                print(f"\n處理：{parequet_file['object_name']}")
+                
+                # calculate df
+                analyzer = MultiPeriodAnalyzer()
+                single_ticker_single_period = analyzer.run_single_period_with_ticker(
+                    df,
+                    period,
+                    config
+                )
+                tickers_with_single_period.append(single_ticker_single_period)
+
+            tickers_with_single_period = pd.concat(tickers_with_single_period, ignore_index=True)
+
+            # scale and cast df
+            exclude_cols = {"EMA_bullbear", "trend", "Side", "Peak", "Trough"}
+            num_cols = [c for c in tickers_with_single_period.select_dtypes(include="number").columns if c not in exclude_cols]
+
+            # apply() 可以「批量操作整欄or整列」
+            tickers_with_single_period[num_cols] = (
+                tickers_with_single_period[num_cols]
+                .apply(pd.to_numeric, errors="coerce")     # pd.to_numeric() 只能處理一維(Series),每欄轉成數值,不能轉的變 NaN
+                .apply(lambda x: np.trunc(x * 100) / 100)  # 截斷到小數點2位
             )
-            tickers_with_single_period.append(single_ticker_single_period)
 
-        tickers_with_single_period = pd.concat(tickers_with_single_period, ignore_index=True)
+            tickers_with_single_period = tickers_with_single_period.astype(object).where(pd.notnull(tickers_with_single_period), None)
+            
+            try:
+                save_df_as_parquet_to_minio(
+                    conn = conn,
+                    df = tickers_with_single_period,
+                    bucket = MINIO_BUCKET,
+                    object_name = f"stock/history/prices/gold/us_{period}.parquet",
+                )
+                save_results.append({
+                    "parquet_name": f"us_{period}",
+                    "status": "success",
+                })
 
-        # scale and cast df
-        exclude_cols = {"EMA_bullbear", "trend", "Side", "Peak", "Trough"}
-        num_cols = [c for c in tickers_with_single_period.select_dtypes(include="number").columns if c not in exclude_cols]
-
-        # apply() 可以「批量操作整欄or整列」
-        tickers_with_single_period[num_cols] = (
-            tickers_with_single_period[num_cols]
-            .apply(pd.to_numeric, errors="coerce")     # pd.to_numeric() 只能處理一維(Series),每欄轉成數值,不能轉的變 NaN
-            .apply(lambda x: np.trunc(x * 100) / 100)  # 截斷到小數點2位
-        )
-
-        tickers_with_single_period = tickers_with_single_period.astype(object).where(pd.notnull(tickers_with_single_period), None)
-        
-        try:
-            save_df_as_parquet_to_minio(
-                conn = get_duckdb_conn(),
-                df = tickers_with_single_period,
-                bucket = MINIO_BUCKET,
-                object_name = f"stock/history/prices/gold/us_{period}.parquet",
-            )
-            save_results.append({
-                "parquet_name": f"us_{period}",
-                "status": "success",
-            })
-
-        except Exception as e:
-            save_results.append({
-                "parquet_name": f"us_{period}",
-                "status": "failed",
-            })    
+            except Exception as e:
+                save_results.append({
+                    "parquet_name": f"us_{period}",
+                    "status": "failed",
+                })
 
     # results 文字摘要（供 slack send）
     summary = text_summary(save_results)

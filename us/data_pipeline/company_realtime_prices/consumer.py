@@ -242,7 +242,7 @@ def run_monitor_consumer():
         ).strftime("%H:%M:%S")
 
         consumer.commit()
-        print(f"[{ts}]  {trade['s']:<6}  {trade['p']:>10.2f}  vol:{trade['v']:>6}")
+        print(f"[{ts}]  {trade['s']:<6}  {trade['p']:>10.3f}  vol:{trade['v']:>6}")
 
 def run_alert_consumer():
     # 啟動時從 Parquet 讀取每個 ticker 的警戒線設定
@@ -290,8 +290,8 @@ def run_alert_consumer():
                         text = (
                             f"{emoji} [ {level.upper():<8}] "
                             f"{symbol:<6} {direction} "
-                            f"{label:<12}({threshold:>8.2f})："
-                            f"{p:>8.2f} → {price:>8.2f}"
+                            f"{label:<12}({threshold:>8.3f})："
+                            f"{p:>8.3f} → {price:>8.3f}"
                         )
                         print(text)
                         slack_price_notify(text)

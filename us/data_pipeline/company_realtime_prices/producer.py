@@ -295,8 +295,6 @@ def main():
         on_close=on_close,
     )
 
-    # ws_ref[0] = ws  # 先存一份，watcher 可以提前拿到
-
     watcher = threading.Thread(
         target=market_close_watcher,
         args=(ws_ref, tz, close_time),

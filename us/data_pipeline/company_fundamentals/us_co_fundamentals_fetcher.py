@@ -1,4 +1,3 @@
-import io
 import sys
 import asyncio
 
@@ -16,7 +15,6 @@ import yfinance as yf
 
 import duckdb
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from botocore.exceptions import ClientError
 from yfinance.exceptions import YFRateLimitError, YFTickerMissingError, YFInvalidPeriodError
@@ -137,12 +135,12 @@ def _upsert_parquet_to_minio(
 
 
 # 3. 抓單一 ticker 基本面（同步）
-def fetch_fund(ticker: str) -> dict:
+def fetch_fund(ticker: str, now_date) -> dict:
     """
     抓取單一 ticker 基本面資料，回傳統一格式的 result dict。
     status: "success" | "failed" | "retry"
     """
-    tz = "America/New_York"
+
     start = time.perf_counter()
     try:
         stock = yf.Ticker(ticker)
@@ -164,7 +162,7 @@ def fetch_fund(ticker: str) -> dict:
 
         # ── 整理欄位 ──────────────────────────
         row_data = {
-            "created_at":                       datetime.now(ZoneInfo(tz)).date(),
+            "created_at":                      now_date,
             "ticker":                          ticker,
             "市值":                              market.get("marketCap", None),
             "本益比(trailingP/E)":               market.get("trailingPE", None),
@@ -236,23 +234,23 @@ def fetch_fund(ticker: str) -> dict:
         }
 
 # 4. 非同步包裝（對應 fetch_price → fetch_one）
-async def fetch_one(ticker: str) -> dict:
+async def fetch_one(ticker: str, now_date) -> dict:
     loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(
         None,
-        lambda: fetch_fund(ticker)
+        lambda: fetch_fund(ticker, now_date)
     )
     return result
 
 # 5. 統籌並發（對應 fetch_all）
-async def fetch_all(tickers: list[str]):
+async def fetch_all(tickers: list[str], now_date):
     sem = asyncio.Semaphore(3)
     
     async def fetch_with_sem(ticker: str) -> dict:
         await asyncio.sleep(random.uniform(0.5, 1.5))
         async with sem:
             await asyncio.sleep(random.uniform(0.5, 1.5))
-            result = await fetch_one(ticker)
+            result = await fetch_one(ticker, now_date)
 
         if result["status"] == "success":
             logger.info(f"{result['ticker']}: 抓取成功")
@@ -322,47 +320,51 @@ def text_summary(success, retry, failed) -> str:
 
 # 7. Entry point
 def main():
-    conn = get_duckdb_conn()
 
-    tickers = get_co_list(
-        conn = conn,
-        bucket = MINIO_BUCKET,
-        object_name = f"stock/company_list/us_tickers_list.parquet"
-    )
-    success, retry, failed = asyncio.run(fetch_all(tickers))
+    tz = "America/New_York"
+    now_date = datetime.now(ZoneInfo(tz)).date()
 
-    # 所有成功的 row dict → 一張 rows_data df → 一個 Parquet
-    if success:
-        rows_data = [r["row_data"] for r in success]
-        df_all = pd.DataFrame(rows_data)
+    with get_duckdb_conn() as conn:
 
-        exclude_cols = {"created_at","ticker","分析師建議/analystRatingKey"}
-        # 處理 object 欄位中的 'Infinity' 字串
-        obj_cols = [c for c in df_all.select_dtypes(include="object").columns if c not in exclude_cols]
-        df_all[obj_cols] = df_all[obj_cols].apply(pd.to_numeric, errors="coerce")
-
-        # 處理真正的 float inf
-        df_all.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-        num_cols = [c for c in df_all.select_dtypes(include="number").columns if c not in exclude_cols]
-        # apply() ,批量操作整欄or整列
-        df_all[num_cols] = (
-            df_all[num_cols]
-            .apply(pd.to_numeric, errors="coerce")     # pd.to_numeric() 只能處理一維(Series),每欄轉成數值,不能轉的變 NaN
-            .apply(lambda x: np.trunc(x * 1000) / 1000)  # 截斷到小數點3位
-        )
-        # 處理缺失值
-        missing_values = ["None","none"]
-        df_all.replace(missing_values, None, inplace=True)
-        df_all.astype(object).where(pd.notnull(df_all), None)
-        
-        _upsert_parquet_to_minio(
+        tickers = get_co_list(
             conn = conn,
-            df_new = df_all,
             bucket = MINIO_BUCKET,
-            temp_object_name = f"stock/fundamentals/temp_us_co_fundamentals.parquet",
-            final_object_name = f"stock/fundamentals/us_all_co_fundamentals.parquet",
+            object_name = f"stock/company_list/us_tickers_list.parquet"
         )
+        success, retry, failed = asyncio.run(fetch_all(tickers, now_date))
+
+        # 所有成功的 row dict → 一張 rows_data df → 一個 Parquet
+        if success:
+            rows_data = [r["row_data"] for r in success]
+            df_all = pd.DataFrame(rows_data)
+
+            exclude_cols = {"created_at","ticker","分析師建議/analystRatingKey"}
+            # 處理 object 欄位中的 'Infinity' 字串
+            obj_cols = [c for c in df_all.select_dtypes(include="object").columns if c not in exclude_cols]
+            df_all[obj_cols] = df_all[obj_cols].apply(pd.to_numeric, errors="coerce")
+
+            # 處理真正的 float inf
+            df_all.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+            num_cols = [c for c in df_all.select_dtypes(include="number").columns if c not in exclude_cols]
+            # apply() ,批量操作整欄or整列
+            df_all[num_cols] = (
+                df_all[num_cols]
+                .apply(pd.to_numeric, errors="coerce")     # pd.to_numeric() 只能處理一維(Series),每欄轉成數值,不能轉的變 NaN
+                .apply(lambda x: np.trunc(x * 1000) / 1000)  # 截斷到小數點3位
+            )
+            # 處理缺失值
+            missing_values = ["None","none"]
+            df_all.replace(missing_values, None, inplace=True)
+            df_all.astype(object).where(pd.notnull(df_all), None)
+            
+            _upsert_parquet_to_minio(
+                conn = conn,
+                df_new = df_all,
+                bucket = MINIO_BUCKET,
+                temp_object_name = f"stock/fundamentals/temp_us_co_fundamentals.parquet",
+                final_object_name = f"stock/fundamentals/us_all_co_fundamentals.parquet",
+            )
 
     summary = text_summary(success, retry, failed)
     slack_pipe_notify(summary)

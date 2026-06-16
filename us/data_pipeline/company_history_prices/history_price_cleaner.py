@@ -112,11 +112,11 @@ def clean_and_upload(
                 FROM temp_parquet
                 WHERE
                     "Open"  IS NOT NULL
-                    OR "High"  IS NOT NULL
-                    OR "Low"   IS NOT NULL
-                    OR "Close" IS NOT NULL
-                    OR "Adj Close" IS NOT NULL
-                    OR "Volume" IS NOT NULL
+                    AND "High"  IS NOT NULL
+                    AND "Low"   IS NOT NULL
+                    AND "Close" IS NOT NULL
+                    AND "Adj Close" IS NOT NULL
+                    AND "Volume" IS NOT NULL
             """).to_arrow_table()
 
             # 統計清洗前後筆數，用於 log 與回傳結果
@@ -199,16 +199,16 @@ def text_summary(results: list[dict]) -> str:
 
 def main():
 
-    conn = duckdb.connect()
+    with duckdb.connect() as conn:
 
-    # 1. 取得今日檔案 buffer 列表
-    files = get_today_parquet_buffers(
-        bucket= MINIO_BUCKET, 
-        prefix= "stock/history/prices/bronze/"
-    )
+        # 1. 取得今日檔案 buffer 列表
+        files = get_today_parquet_buffers(
+            bucket= MINIO_BUCKET, 
+            prefix= "stock/history/prices/bronze/"
+        )
 
-    # 2. 逐一清洗並存回 MinIO
-    results = clean_and_upload(conn, MINIO_BUCKET, files)
+        # 2. 逐一清洗並存回 MinIO
+        results = clean_and_upload(conn, MINIO_BUCKET, files)
 
     # 3. results 文字摘要（供 slack send）
     summary = text_summary(results)
