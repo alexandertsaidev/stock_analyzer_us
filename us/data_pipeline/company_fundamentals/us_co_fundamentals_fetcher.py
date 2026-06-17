@@ -149,12 +149,12 @@ def fetch_fund(ticker: str, now_date) -> dict:
         # ── 價格計算 ──────────────────────────
         current_price = market.get("currentPrice")
         if current_price is None:
-            hist = stock.history(period="max")
+            hist = stock.history(period='max', auto_adjust=False)
             if hist.empty:
                 raise ValueError("history 為空，無法取得 current_price")
             current_price = hist["Close"].iloc[-1]
 
-        hist_high = stock.history(period="max")["Close"].max()
+        hist_high = stock.history(period='max', auto_adjust=False)["Close"].max()
         hist_high_52w = market.get("fiftyTwoWeekHigh")
 
         price_ratio    = np.trunc((current_price / hist_high) * 100) / 100 if hist_high else None
@@ -247,9 +247,9 @@ async def fetch_all(tickers: list[str], now_date):
     sem = asyncio.Semaphore(3)
     
     async def fetch_with_sem(ticker: str) -> dict:
-        await asyncio.sleep(random.uniform(0.5, 1.5))
+        await asyncio.sleep(random.uniform(1, 1.5))
         async with sem:
-            await asyncio.sleep(random.uniform(0.5, 1.5))
+            await asyncio.sleep(random.uniform(1.3, 2))
             result = await fetch_one(ticker, now_date)
 
         if result["status"] == "success":

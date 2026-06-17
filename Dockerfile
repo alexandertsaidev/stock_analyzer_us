@@ -16,7 +16,3 @@ RUN touch /app/stock_analyzer_us/__init__.py
 
 # 開發測試用
 CMD ["bash"]
-
-# 生產環境用（擇一取消註解）
-# CMD ["python", "scripts/fetch_stock.py"]
-# CMD ["python", "scheduler.py"]
