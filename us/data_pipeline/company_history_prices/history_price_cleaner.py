@@ -104,21 +104,29 @@ def clean_and_upload(
 
             # 執行清洗
             out_buffer = io.BytesIO()
+
             cleaned = conn.execute("""
                 SELECT
                     "Date"::DATE AS "Date",
-                    *
-                EXCLUDE ("Date")
+                    "Open",
+                    "High",
+                    "Low",
+                    "Close",
+                    "Adj Close",
+                    "Volume",
+                    "Dividends",
+                    "Stock Splits",
+                    "created_at"
                 FROM temp_parquet
                 WHERE
-                    "Open"  IS NOT NULL
-                    AND "High"  IS NOT NULL
-                    AND "Low"   IS NOT NULL
-                    AND "Close" IS NOT NULL
+                    "Open"        IS NOT NULL
+                    AND "High"    IS NOT NULL
+                    AND "Low"     IS NOT NULL
+                    AND "Close"   IS NOT NULL
                     AND "Adj Close" IS NOT NULL
-                    AND "Volume" IS NOT NULL
+                    AND "Volume"  IS NOT NULL
             """).to_arrow_table()
-
+            
             # 統計清洗前後筆數，用於 log 與回傳結果
             raw_count     = conn.execute("SELECT COUNT(*) FROM temp_parquet").fetchone()[0]
             cleaned_count = cleaned.num_rows
