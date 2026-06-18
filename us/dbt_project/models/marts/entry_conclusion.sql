@@ -87,7 +87,7 @@ WITH base AS (
 
     LEFT JOIN LATERAL (
         SELECT "Date", "Side_1", "Side_2", "Side_3"
-        FROM {{ ref('stg_prices_2M') }}
+        FROM {{ ref('stg_prices_2ME') }}
         WHERE "ticker" = b."ticker"
         AND "Date" <= b."Date" + INTERVAL '63 days'
         ORDER BY "Date" DESC
@@ -96,7 +96,7 @@ WITH base AS (
 
     LEFT JOIN LATERAL (
         SELECT "Date", "Side_1", "Side_2", "Side_3"
-        FROM {{ ref('stg_prices_3M') }}
+        FROM {{ ref('stg_prices_3ME') }}
         WHERE "ticker" = b."ticker"
         AND "Date" <= b."Date" + INTERVAL '93 days'
         ORDER BY "Date" DESC

@@ -57,11 +57,11 @@ indicator_and_period_configs = {
         "indicator_params": {**DEFAULT_INDICATOR_PARAMS},
         "explain_params": {**DEFAULT_EXPLAIN_PARAMS}
     },
-    "2M": {
+    "2ME": {
         "indicator_params": {**DEFAULT_INDICATOR_PARAMS},
         "explain_params": {**DEFAULT_EXPLAIN_PARAMS}
     },
-    "3M": {
+    "3ME": {
         "indicator_params": {**DEFAULT_INDICATOR_PARAMS},
         "explain_params": {**DEFAULT_EXPLAIN_PARAMS},
     }

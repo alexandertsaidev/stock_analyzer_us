@@ -1,18 +1,34 @@
-FROM python:3.11-slim
+FROM python:3.11-slim AS dev
 WORKDIR /app
 
-# 設定 PYTHONPATH
 ENV PYTHONPATH=/app/stock_analyzer_us
 
-# 安裝 Python 套件
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y libta-lib-dev && rm -rf /var/lib/apt/lists/*
 
-# 複製整個專案
+COPY pyproject.toml poetry.lock ./
+RUN pip install poetry \
+    && poetry config virtualenvs.create false \
+    && poetry install --no-root
+
 COPY . /app/stock_analyzer_us/
-
-# 確保可 import
 RUN touch /app/stock_analyzer_us/__init__.py
 
-# 開發測試用
+CMD ["bash"]
+
+
+FROM python:3.11-slim AS prod
+WORKDIR /app
+
+ENV PYTHONPATH=/app/stock_analyzer_us
+
+RUN apt-get update && apt-get install -y libta-lib-dev && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml poetry.lock ./
+RUN pip install poetry \
+    && poetry config virtualenvs.create false \
+    && poetry install --no-root --only main
+
+COPY . /app/stock_analyzer_us/
+RUN touch /app/stock_analyzer_us/__init__.py
+
 CMD ["bash"]

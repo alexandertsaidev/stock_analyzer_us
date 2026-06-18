@@ -88,12 +88,16 @@ def load_alert_config() -> dict:
     # 找出沒有對應 Parquet 資料的 ticker，方便 debug
     missing = set(tickers) - set(config.keys())
     if missing:
-        print(f"[load_alert_config] ⚠️ 無資料的 ticker：{missing}")
+        print(f"[load_alert_config] ⚠️  無資料的 ticker：{missing}")
 
     return config
 
 
-def make_consumer(group_id):
+def make_consumer(
+    group_id,
+    fetch_max_wait_ms=500,
+    fetch_min_bytes=1
+    ):
     """
     建立並回傳一個 KafkaConsumer 實例
     每個 Consumer 傳入不同 group_id，確保各自維護獨立的 offset
@@ -118,74 +122,21 @@ def make_consumer(group_id):
         # 同一個 group_id 的 Consumer 共享 offset（同一組）,不同各自獨立消費
         group_id=group_id,
         enable_auto_commit=False,  # ← 關掉 auto commit
+
+        fetch_max_wait_ms=fetch_max_wait_ms,
+        fetch_min_bytes=fetch_min_bytes,
     )
 
     return consumer
-    # 回傳的 consumer 是一個可迭代物件
-    # 呼叫端直接 for msg in consumer 就能持續讀取訊息
-    # msg.key   → "AAPL"               （字串，已 deserialize）
-    # msg.value → {"s":"AAPL","p":182.5,...} （dict，已 deserialize）
-    # msg.topic     → "trades"
-    # msg.partition → 0
-    # msg.offset    → 目前讀到第幾筆
-
-
-# def run_minio_consumer():
-#     consumer = make_consumer("minio-consumer")
-#     buf = []
-#     last_flush = time.time()
-
-#     tz = ZoneInfo("America/New_York")
-    
-#     for msg in consumer:
-#         try:
-#             buf.append(msg.value)
-
-#             if len(buf) >= 500 or time.time() - last_flush > 10:
-
-#                 # dedup：用 (t, s, p, v) 當唯一鍵
-#                 seen = set()
-#                 deduped = []
-#                 for r in buf:
-#                     key = (r["t"], r["s"], r["p"], r["v"])
-#                     if key not in seen:
-#                         seen.add(key)
-#                         deduped.append(r)
-
-#                 groups = defaultdict(list)
-#                 for record in deduped:
-#                     groups[record["s"]].append(record)
-
-#                 for symbol, records in groups.items():
-#                     # 用資料實際交易時間當檔名
-#                     t_start = datetime.fromtimestamp(records[0]["t"] / 1000, tz = tz)
-#                     t_end   = datetime.fromtimestamp(records[-1]["t"] / 1000, tz = tz)
-#                     date    = t_start.strftime("%Y-%m-%d")
-#                     ts      = f"{t_start.strftime('%H-%M-%S')}_{t_end.strftime('%H-%M-%S')}"
-
-#                     jsonl_bytes = io.BytesIO(
-#                         "\n".join(json.dumps(r) for r in records).encode("utf-8")
-#                     )
-#                     key = f"stock/real-time/prices/bronze/{symbol}/{date}/{ts}.jsonl"
-#                     s3_client.put_object(
-#                         Bucket=MINIO_BUCKET,
-#                         Key=key,
-#                         Body=jsonl_bytes.getvalue(),
-#                         ContentLength=jsonl_bytes.getbuffer().nbytes,
-#                         ContentType="application/octet-stream",
-#                     )
-#                     print(f"📦 MinIO flush {len(records):>4} 筆  {symbol:<6} → {key}")
-
-#                 buf = []
-#                 last_flush = time.time()
-#                 consumer.commit()
-
-#         except Exception as e:
-#             print(f"❌ minio-consumer 錯誤: {e}")
 
 
 def run_minio_consumer():
-    consumer = make_consumer("minio-consumer")
+    consumer = make_consumer(
+        "minio-consumer",
+        fetch_max_wait_ms=1000,   # batch 寫入，不需要快
+        fetch_min_bytes=1024    # 湊滿 1KB 再回傳，減少小批次):
+    )
+
     buf = []
     last_flush = time.time()
     tz = ZoneInfo("America/New_York")
@@ -229,7 +180,11 @@ def run_minio_consumer():
             print(f"❌ minio-consumer 錯誤: {e}")
 
 def run_monitor_consumer():
-    consumer = make_consumer("monitor-consumer")
+    consumer = make_consumer(
+        "monitor-consumer",
+        fetch_max_wait_ms=250,   # 中等
+        fetch_min_bytes=1
+    )
 
     for msg in consumer:
         trade = msg.value
@@ -248,8 +203,12 @@ def run_alert_consumer():
     # 啟動時從 Parquet 讀取每個 ticker 的警戒線設定
     ALERT_CONFIG = load_alert_config()
 
-    consumer     = make_consumer("alert-consumer")
-    
+    consumer = make_consumer(
+        "alert-consumer",
+        fetch_max_wait_ms=50,    # 最快
+        fetch_min_bytes=1,       # 有資料就馬上回傳
+    )
+
     prev         = {}   # symbol → 上一筆成交價（用來判斷是否穿越警戒線）
     last_sent    = {}   # (symbol, label) → 上次告警的 timestamp（cooldown 用）
 
